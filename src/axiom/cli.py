@@ -14,6 +14,7 @@ from .normalize import (
 )
 from .projectx import (
     BarUnit,
+    Contract,
     ProjectXClient,
     ProjectXError,
     compact_utc,
@@ -27,12 +28,34 @@ from .qa import (
     find_latest_realtime_dir,
     write_report_pair,
 )
+from .recording import RecordingConfig, run_realtime_recorder
 from .storage import bars_csv_path, history_raw_path, write_bars_csv, write_json
 
 
 def build_parser() -> ArgumentParser:
-    parser = ArgumentParser(prog="axiom", description="Axiom data tooling")
+    parser = ArgumentParser(
+        prog="axiom",
+        description=(
+            "Axiom data tooling. Run with no command to execute the default "
+            "auth -> normalize -> QA pipeline."
+        ),
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    run_parser = subparsers.add_parser(
+        "run", help="Run the default auth, normalize, and QA pipeline"
+    )
+    run_parser.add_argument("--skip-auth", action="store_true")
+    run_parser.add_argument("--skip-normalize", action="store_true")
+    run_parser.add_argument("--skip-qa", action="store_true")
+    run_parser.add_argument("--skip-record", action="store_true")
+    run_parser.add_argument("--tick-size", type=float, default=0.25)
+    run_parser.add_argument("--no-write-qa", action="store_true")
+    run_parser.add_argument("--record-contract-id")
+    run_parser.add_argument("--record-symbol", default="MNQ")
+    run_parser.add_argument("--record-events", default="quotes,trades,depth")
+    run_parser.add_argument("--record-duration-seconds", type=int)
+    run_parser.set_defaults(handler=cmd_run)
 
     auth_parser = subparsers.add_parser("auth", help="Authenticate with Project X")
     auth_parser.set_defaults(handler=cmd_auth)
@@ -116,6 +139,13 @@ def build_parser() -> ArgumentParser:
     )
     normalize_all.set_defaults(handler=cmd_normalize_all)
 
+    record = subparsers.add_parser("record", help="Record real-time Project X market data")
+    record.add_argument("--contract-id")
+    record.add_argument("--symbol", default="MNQ")
+    record.add_argument("--events", default="quotes,trades,depth")
+    record.add_argument("--duration-seconds", type=int)
+    record.set_defaults(handler=cmd_record)
+
     return parser
 
 
@@ -141,6 +171,45 @@ def authenticated_client(settings: Settings) -> ProjectXClient:
     client = ProjectXClient(base_url=settings.projectx_base_url)
     client.authenticate(username, api_key)
     return client
+
+
+def cmd_run(args: Namespace) -> int:
+    if not args.skip_auth:
+        print_section("Project X Auth")
+        auth_code = cmd_auth(Namespace())
+        if auth_code:
+            return auth_code
+
+    if not args.skip_normalize:
+        print_section("Normalize")
+        normalize_code = cmd_normalize_all(Namespace())
+        if normalize_code:
+            return normalize_code
+
+    if not args.skip_qa:
+        print_section("QA")
+        qa_code = cmd_qa_all(
+            Namespace(tick_size=args.tick_size, no_write=args.no_write_qa)
+        )
+        if qa_code:
+            return qa_code
+
+    if not args.skip_record:
+        print_section("Live Recording")
+        record_code = cmd_record(
+            Namespace(
+                contract_id=args.record_contract_id,
+                symbol=args.record_symbol,
+                events=args.record_events,
+                duration_seconds=args.record_duration_seconds,
+            )
+        )
+        if record_code:
+            return record_code
+
+    print_section("Done")
+    print("Axiom pipeline complete.")
+    return 0
 
 
 def cmd_auth(_: Namespace) -> int:
@@ -381,6 +450,55 @@ def cmd_normalize_all(_: Namespace) -> int:
     return max(bars_code, realtime_code)
 
 
+def cmd_record(args: Namespace) -> int:
+    settings = Settings.from_env()
+    contract_id = args.contract_id
+    if not contract_id:
+        client = authenticated_client(settings)
+        contract = resolve_active_contract(
+            client,
+            symbol=args.symbol,
+            live=settings.projectx_live,
+        )
+        contract_id = contract.id
+        print(f"Selected {contract.name} ({contract.id}) - {contract.description}")
+
+    print(
+        "Recording real-time Project X data. Press Ctrl+C to stop."
+        if args.duration_seconds is None
+        else f"Recording real-time Project X data for {args.duration_seconds} seconds."
+    )
+    sys.stdout.flush()
+    return run_realtime_recorder(
+        RecordingConfig(
+            contract_id=contract_id,
+            events=args.events,
+            data_dir=settings.data_dir,
+            duration_seconds=args.duration_seconds,
+        )
+    )
+
+
+def resolve_active_contract(
+    client: ProjectXClient,
+    symbol: str,
+    live: bool,
+) -> Contract:
+    contracts = client.search_contracts(symbol, live=live)
+    active = [contract for contract in contracts if contract.active_contract]
+    if not active:
+        raise ProjectXError(f"No active contract found for {symbol}")
+    return next(
+        (
+            item
+            for item in active
+            if item.symbol_id.upper().endswith(f".{symbol.upper()}")
+            or item.name.upper().startswith(symbol.upper())
+        ),
+        active[0],
+    )
+
+
 def print_normalized_files(outputs: list[object]) -> None:
     if not outputs:
         print("No files normalized.")
@@ -389,6 +507,11 @@ def print_normalized_files(outputs: list[object]) -> None:
         print(f"{output.name}: {output.rows:,} rows")
         print(f"  source: {output.source}")
         print(f"  output: {output.path}")
+
+
+def print_section(title: str) -> None:
+    print()
+    print(f"== {title} ==", flush=True)
 
 
 def print_contract_table(rows: list[dict[str, object]]) -> None:
@@ -407,6 +530,11 @@ def print_contract_table(rows: list[dict[str, object]]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        argv = ["run"]
+
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

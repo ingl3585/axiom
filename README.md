@@ -20,6 +20,13 @@ python -m venv .venv
 python -m pip install -e .
 ```
 
+If `python` is not on PATH on this machine, use the bundled Codex runtime once to create the venv:
+
+```powershell
+& 'C:\Users\Tony\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
 Copy `.env.example` to `.env` and fill in:
 
 ```text
@@ -28,6 +35,38 @@ PROJECTX_API_KEY=...
 ```
 
 ## Quick Checks
+
+On Windows, use the root wrappers:
+
+```powershell
+.\axiom.cmd --help
+.\axiom.cmd auth
+.\axiom.cmd contracts search MNQ --active-only
+```
+
+You can also run the project through `main.py`:
+
+```powershell
+.\.venv\Scripts\python.exe main.py
+```
+
+By default, `main.py` runs Project X auth, normalizes the latest raw data, writes fresh QA reports, then starts recording live Project X market data. It keeps running until you press `Ctrl+C`.
+
+For a short smoke test:
+
+```powershell
+.\.venv\Scripts\python.exe main.py run --record-duration-seconds 30
+```
+
+You can still run individual pieces:
+
+```powershell
+.\.venv\Scripts\python.exe main.py --help
+.\.venv\Scripts\python.exe main.py auth
+.\.venv\Scripts\python.exe main.py normalize all
+.\.venv\Scripts\python.exe main.py qa all
+.\.venv\Scripts\python.exe main.py record --duration-seconds 60
+```
 
 Authenticate:
 
@@ -72,6 +111,12 @@ For a short smoke test:
 node scripts/projectx_realtime.mjs --contract-id CON.F.US.MNQ.U25 --events quotes,trades --duration-seconds 30
 ```
 
+Or use the Windows wrapper:
+
+```powershell
+.\record.cmd --contract-id CON.F.US.MNQ.U25 --events quotes,trades --duration-seconds 30
+```
+
 If `node` is not on PATH, use your installed Node executable or the Codex bundled runtime.
 
 ## Data QA
@@ -79,14 +124,14 @@ If `node` is not on PATH, use your installed Node executable or the Codex bundle
 Run QA against the latest historical bars and real-time capture:
 
 ```powershell
-python -m axiom qa all
+.\axiom.cmd qa all
 ```
 
 Or inspect either side independently:
 
 ```powershell
-python -m axiom qa bars
-python -m axiom qa realtime
+.\axiom.cmd qa bars
+.\axiom.cmd qa realtime
 ```
 
 Reports are written to `data/reports/qa/` as Markdown and JSON.
@@ -96,14 +141,14 @@ Reports are written to `data/reports/qa/` as Markdown and JSON.
 Normalize raw Project X captures into stable bronze CSV tables:
 
 ```powershell
-python -m axiom normalize all
+.\axiom.cmd normalize all
 ```
 
 Or normalize one side at a time:
 
 ```powershell
-python -m axiom normalize bars
-python -m axiom normalize realtime
+.\axiom.cmd normalize bars
+.\axiom.cmd normalize realtime
 ```
 
 Real-time quote, trade, and depth events are flattened so each row represents one market-data record rather than one SignalR frame.

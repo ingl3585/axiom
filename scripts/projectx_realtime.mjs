@@ -24,6 +24,9 @@ function parseArgs(argv) {
     events: "quotes,trades,depth",
     dataDir: process.env.AXIOM_DATA_DIR || "data",
     durationSeconds: null,
+    liveFeatures: true,
+    featureWindows: "1,5,30,60",
+    featureIntervalSeconds: 1,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -40,6 +43,16 @@ function parseArgs(argv) {
       i += 1;
     } else if (arg === "--duration-seconds") {
       args.durationSeconds = Number(next);
+      i += 1;
+    } else if (arg === "--live-features") {
+      args.liveFeatures = true;
+    } else if (arg === "--no-live-features") {
+      args.liveFeatures = false;
+    } else if (arg === "--feature-windows") {
+      args.featureWindows = next;
+      i += 1;
+    } else if (arg === "--feature-interval-seconds") {
+      args.featureIntervalSeconds = Number(next);
       i += 1;
     } else if (arg === "--help" || arg === "-h") {
       printHelp();
@@ -65,6 +78,9 @@ Options:
   --events quotes,trades,depth   Event subscriptions to enable
   --data-dir data                Local data root
   --duration-seconds 30          Stop after N seconds
+  --no-live-features             Disable rolling live feature snapshots
+  --feature-windows 1,5,30,60    Rolling windows in seconds
+  --feature-interval-seconds 1   Snapshot interval in seconds
 `);
 }
 
@@ -131,21 +147,203 @@ function eventFile(dataDir, contractId, target) {
   );
 }
 
+function liveFeatureFile(dataDir, contractId) {
+  const date = new Date().toISOString().slice(0, 10);
+  const contract = safePartitionValue(contractId);
+  return join(
+    dataDir,
+    "live",
+    "projectx",
+    "features",
+    `date=${date}`,
+    `contract=${contract}`,
+    "features.jsonl",
+  );
+}
+
 function appendJsonl(path, payload) {
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, `${JSON.stringify(payload)}\n`, "utf8");
+}
+
+function parseTimestamp(value) {
+  if (!value || typeof value !== "string" || value.startsWith("0001-01-01")) return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : null;
+}
+
+function recordList(data) {
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === "object") return [data];
+  return [];
 }
 
 function signalRFrame(message) {
   return `${JSON.stringify(message)}${RECORD_SEPARATOR}`;
 }
 
+class LiveFeatureEngine {
+  constructor({ dataDir, contractId, windowsSeconds, intervalSeconds }) {
+    this.dataDir = dataDir;
+    this.contractId = contractId;
+    this.windowsSeconds = windowsSeconds;
+    this.intervalMs = intervalSeconds * 1000;
+    this.maxWindowMs = Math.max(...windowsSeconds) * 1000;
+    this.quoteEvents = [];
+    this.tradeEvents = [];
+    this.depthEvents = [];
+    this.lastQuote = null;
+    this.lastSnapshotAt = 0;
+  }
+
+  onMarketEvent(target, observedAt, data) {
+    const observedMs = Date.parse(observedAt);
+    if (!Number.isFinite(observedMs)) return;
+    for (const record of recordList(data)) {
+      if (target === "GatewayQuote") {
+        this.onQuote(observedMs, record);
+      } else if (target === "GatewayTrade") {
+        this.onTrade(observedMs, record);
+      } else if (target === "GatewayDepth") {
+        this.onDepth(observedMs, record);
+      }
+    }
+    this.maybeSnapshot(observedMs);
+    this.prune(observedMs);
+  }
+
+  onQuote(observedMs, record) {
+    const bid = Number(record.bestBid);
+    const ask = Number(record.bestAsk);
+    if (!Number.isFinite(bid) || !Number.isFinite(ask)) return;
+    const eventMs = parseTimestamp(record.lastUpdated) ?? parseTimestamp(record.timestamp) ?? observedMs;
+    const quote = {
+      observedMs,
+      eventMs,
+      bid,
+      ask,
+      mid: (bid + ask) / 2,
+      spread: ask - bid,
+    };
+    this.quoteEvents.push(quote);
+    this.lastQuote = quote;
+  }
+
+  onTrade(observedMs, record) {
+    const volume = Number(record.volume || 0);
+    const tradeType = Number(record.type);
+    const price = Number(record.price);
+    const eventMs = parseTimestamp(record.timestamp) ?? observedMs;
+    this.tradeEvents.push({
+      observedMs,
+      eventMs,
+      volume: Number.isFinite(volume) ? volume : 0,
+      tradeType: Number.isFinite(tradeType) ? tradeType : null,
+      price: Number.isFinite(price) ? price : null,
+    });
+  }
+
+  onDepth(observedMs, record) {
+    const depthType = Number(record.type);
+    const eventMs = parseTimestamp(record.timestamp) ?? observedMs;
+    this.depthEvents.push({
+      observedMs,
+      eventMs,
+      depthType: Number.isFinite(depthType) ? depthType : null,
+    });
+  }
+
+  maybeSnapshot(nowMs) {
+    if (!this.lastQuote) return;
+    const bucket = Math.floor(nowMs / this.intervalMs) * this.intervalMs;
+    if (bucket <= this.lastSnapshotAt) return;
+    this.lastSnapshotAt = bucket;
+    const snapshot = this.snapshot(nowMs, bucket);
+    appendJsonl(liveFeatureFile(this.dataDir, this.contractId), snapshot);
+    if (snapshot.sequence % 30 === 0) {
+      console.log(
+        `${snapshot.timestamp} live mid=${snapshot.midPrice} spread=${snapshot.spread} ` +
+        `vol5s=${snapshot.tradeVolume_5s ?? 0} imb5s=${snapshot.tradeImbalance_5s ?? ""}`,
+      );
+    }
+  }
+
+  snapshot(nowMs, bucketMs) {
+    const snapshot = {
+      timestamp: new Date(nowMs).toISOString(),
+      contractId: this.contractId,
+      sequence: Math.floor(bucketMs / this.intervalMs),
+      midPrice: this.lastQuote.mid,
+      bestBid: this.lastQuote.bid,
+      bestAsk: this.lastQuote.ask,
+      spread: this.lastQuote.spread,
+      secondsSinceQuote: (nowMs - this.lastQuote.observedMs) / 1000,
+    };
+
+    for (const windowSeconds of this.windowsSeconds) {
+      const startMs = nowMs - windowSeconds * 1000;
+      const quoteWindow = this.quoteEvents.filter((event) => event.observedMs >= startMs && event.observedMs <= nowMs);
+      const tradeWindow = this.tradeEvents.filter((event) => event.observedMs >= startMs && event.observedMs <= nowMs);
+      const depthWindow = this.depthEvents.filter((event) => event.observedMs >= startMs && event.observedMs <= nowMs);
+
+      const tradeVolume = sum(tradeWindow, (event) => event.volume);
+      const type0Volume = sum(tradeWindow.filter((event) => event.tradeType === 0), (event) => event.volume);
+      const type1Volume = sum(tradeWindow.filter((event) => event.tradeType === 1), (event) => event.volume);
+      const quoteSpreads = quoteWindow.map((event) => event.spread).filter(Number.isFinite);
+
+      snapshot[`quoteUpdates_${windowSeconds}s`] = quoteWindow.length;
+      snapshot[`avgSpread_${windowSeconds}s`] = quoteSpreads.length ? sum(quoteSpreads, (value) => value) / quoteSpreads.length : null;
+      snapshot[`tradeCount_${windowSeconds}s`] = tradeWindow.length;
+      snapshot[`tradeVolume_${windowSeconds}s`] = tradeVolume;
+      snapshot[`tradeType0Volume_${windowSeconds}s`] = type0Volume;
+      snapshot[`tradeType1Volume_${windowSeconds}s`] = type1Volume;
+      snapshot[`tradeImbalance_${windowSeconds}s`] = tradeVolume ? (type0Volume - type1Volume) / tradeVolume : null;
+      snapshot[`depthUpdates_${windowSeconds}s`] = depthWindow.length;
+      snapshot[`realizedVol_${windowSeconds}s`] = realizedVol(quoteWindow);
+      snapshot[`return_${windowSeconds}s`] = windowReturn(quoteWindow, this.lastQuote.mid);
+    }
+    return snapshot;
+  }
+
+  prune(nowMs) {
+    const cutoff = nowMs - this.maxWindowMs - 5000;
+    this.quoteEvents = this.quoteEvents.filter((event) => event.observedMs >= cutoff);
+    this.tradeEvents = this.tradeEvents.filter((event) => event.observedMs >= cutoff);
+    this.depthEvents = this.depthEvents.filter((event) => event.observedMs >= cutoff);
+  }
+}
+
+function sum(values, selector) {
+  return values.reduce((total, value) => total + selector(value), 0);
+}
+
+function realizedVol(quoteWindow) {
+  if (quoteWindow.length < 2) return 0;
+  let variance = 0;
+  for (let i = 1; i < quoteWindow.length; i += 1) {
+    const previous = quoteWindow[i - 1].mid;
+    const current = quoteWindow[i].mid;
+    if (previous > 0 && current > 0) {
+      variance += Math.log(current / previous) ** 2;
+    }
+  }
+  return Math.sqrt(variance);
+}
+
+function windowReturn(quoteWindow, currentMid) {
+  if (quoteWindow.length < 2) return null;
+  const first = quoteWindow[0].mid;
+  if (!first || !currentMid) return null;
+  return currentMid / first - 1;
+}
+
 class ProjectXMarketRecorder {
-  constructor({ token, contractId, events, dataDir }) {
+  constructor({ token, contractId, events, dataDir, featureEngine }) {
     this.token = token;
     this.contractId = contractId;
     this.events = new Set(events);
     this.dataDir = dataDir;
+    this.featureEngine = featureEngine;
     this.invocationId = 1;
     this.counts = { GatewayQuote: 0, GatewayTrade: 0, GatewayDepth: 0 };
     this.startedAt = new Date().toISOString();
@@ -241,6 +439,9 @@ class ProjectXMarketRecorder {
       data,
     };
     appendJsonl(eventFile(this.dataDir, this.contractId, target), payload);
+    if (this.featureEngine) {
+      this.featureEngine.onMarketEvent(target, observedAt, data);
+    }
 
     if (target in this.counts) {
       this.counts[target] += 1;
@@ -265,11 +466,24 @@ async function main() {
     .filter(Boolean);
 
   const token = await login();
+  const featureWindows = args.featureWindows
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const featureEngine = args.liveFeatures
+    ? new LiveFeatureEngine({
+        dataDir: args.dataDir,
+        contractId: args.contractId,
+        windowsSeconds: featureWindows.length ? featureWindows : [1, 5, 30, 60],
+        intervalSeconds: args.featureIntervalSeconds,
+      })
+    : null;
   const recorder = new ProjectXMarketRecorder({
     token,
     contractId: args.contractId,
     events,
     dataDir: args.dataDir,
+    featureEngine,
   });
   recorder.connect();
 
@@ -285,4 +499,3 @@ main().catch((error) => {
   console.error(error.stack || error.message || error);
   process.exit(1);
 });
-

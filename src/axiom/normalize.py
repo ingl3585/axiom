@@ -35,6 +35,16 @@ def normalize_bars_history_json(raw_path: Path, data_dir: Path) -> NormalizedFil
     return NormalizedFile("bars", raw_path, output_path, len(bars))
 
 
+def normalize_history_dir(data_dir: Path) -> list[NormalizedFile]:
+    history_root = data_dir / "raw" / "projectx" / "history"
+    if not history_root.exists():
+        return []
+    outputs: list[NormalizedFile] = []
+    for raw_path in sorted(history_root.rglob("*.json")):
+        outputs.append(normalize_bars_history_json(raw_path, data_dir))
+    return outputs
+
+
 def normalize_realtime_dir(raw_dir: Path, data_dir: Path) -> list[NormalizedFile]:
     outputs: list[NormalizedFile] = []
     for name in ("quotes", "trades", "depth"):
@@ -271,4 +281,3 @@ def contract_from_partition(path: Path) -> str:
         "contract=unknown",
     )
     return safe_partition_value(contract_part.split("=", 1)[1])
-

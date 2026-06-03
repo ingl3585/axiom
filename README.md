@@ -50,7 +50,7 @@ You can also run the project through `main.py`:
 .\.venv\Scripts\python.exe main.py
 ```
 
-By default, `main.py` runs Project X auth, normalizes the latest raw data, writes fresh QA reports, then starts recording live Project X market data. It keeps running until you press `Ctrl+C`.
+By default, `main.py` runs Project X auth, backfills missing MNQ historical bars, normalizes the latest raw data, builds intraday feature rows, writes fresh QA reports, then starts recording live Project X market data. While recording, it also writes rolling live feature snapshots. It keeps running until you press `Ctrl+C`.
 
 For a short smoke test:
 
@@ -63,7 +63,9 @@ You can still run individual pieces:
 ```powershell
 .\.venv\Scripts\python.exe main.py --help
 .\.venv\Scripts\python.exe main.py auth
+.\.venv\Scripts\python.exe main.py backfill
 .\.venv\Scripts\python.exe main.py normalize all
+.\.venv\Scripts\python.exe main.py features intraday
 .\.venv\Scripts\python.exe main.py qa all
 .\.venv\Scripts\python.exe main.py record --duration-seconds 60
 ```
@@ -153,6 +155,28 @@ Or normalize one side at a time:
 
 Real-time quote, trade, and depth events are flattened so each row represents one market-data record rather than one SignalR frame.
 
+## Historical Backfill
+
+Backfill downloads only missing historical bars for the active MNQ contract. Axiom tracks progress in `data/state/history_state.json`.
+
+```powershell
+.\.venv\Scripts\python.exe main.py backfill
+```
+
+On a first run, Axiom uses a 30-day initial window by default. On later runs, it resumes from the last stored `lastEndTime`, so a week away only downloads the missing week.
+
+## Features
+
+Build fixed-window intraday features from bronze quote, trade, and depth tables:
+
+```powershell
+.\.venv\Scripts\python.exe main.py features intraday
+```
+
+The first feature table is written under `data/silver/projectx/features/intraday/`. It includes 1s, 5s, 30s, and 60s trailing windows by default, plus 5s, 30s, and 60s forward-return labels.
+
+During live recording, rolling feature snapshots are written under `data/live/projectx/features/`. These are not trading signals yet; they are the live feature vectors that a future signal/risk/execution engine can consume.
+
 ## Data Layout
 
 ```text
@@ -187,7 +211,21 @@ data/
         date=2026-06-03/
           contract=CON_F_US_MNQ_U25/
             depth.csv
+  silver/
+    projectx/
+      features/
+        intraday/
+          date=2026-06-03/
+            contract=CON_F_US_MNQ_U25/
+              features_1s.csv
+  live/
+    projectx/
+      features/
+        date=2026-06-03/
+          contract=CON_F_US_MNQ_U25/
+            features.jsonl
   state/
+    history_state.json
   reports/
     qa/
 ```

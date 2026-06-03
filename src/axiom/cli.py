@@ -7,8 +7,11 @@ import json
 import sys
 
 from .config import Settings
+from .features import IntradayFeatureConfig, build_intraday_features
+from .history import HistoryBackfillResult, backfill_historical_bars
 from .normalize import (
     append_manifest,
+    normalize_history_dir,
     normalize_bars_history_json,
     normalize_realtime_dir,
 )
@@ -37,24 +40,38 @@ def build_parser() -> ArgumentParser:
         prog="axiom",
         description=(
             "Axiom data tooling. Run with no command to execute the default "
-            "auth -> normalize -> QA pipeline."
+            "auth -> normalize -> features -> QA -> record pipeline."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser(
-        "run", help="Run the default auth, normalize, and QA pipeline"
+        "run",
+        help="Run the default auth, backfill, normalize, features, QA, and record pipeline",
     )
     run_parser.add_argument("--skip-auth", action="store_true")
+    run_parser.add_argument("--skip-backfill", action="store_true")
     run_parser.add_argument("--skip-normalize", action="store_true")
+    run_parser.add_argument("--skip-features", action="store_true")
     run_parser.add_argument("--skip-qa", action="store_true")
     run_parser.add_argument("--skip-record", action="store_true")
+    run_parser.add_argument("--backfill-symbol", default="MNQ")
+    run_parser.add_argument("--backfill-days", type=int, default=30)
+    run_parser.add_argument("--backfill-unit", default="minute", choices=sorted(_unit_choices()))
+    run_parser.add_argument("--backfill-unit-number", type=int, default=1)
     run_parser.add_argument("--tick-size", type=float, default=0.25)
     run_parser.add_argument("--no-write-qa", action="store_true")
+    run_parser.add_argument("--feature-windows", default="1,5,30,60")
+    run_parser.add_argument("--feature-horizons", default="5,30,60")
+    run_parser.add_argument("--feature-interval-seconds", type=int, default=1)
+    run_parser.add_argument("--feature-max-stale-quote-seconds", type=int, default=5)
     run_parser.add_argument("--record-contract-id")
     run_parser.add_argument("--record-symbol", default="MNQ")
     run_parser.add_argument("--record-events", default="quotes,trades,depth")
     run_parser.add_argument("--record-duration-seconds", type=int)
+    run_parser.add_argument("--record-no-live-features", action="store_true")
+    run_parser.add_argument("--record-feature-windows", default="1,5,30,60")
+    run_parser.add_argument("--record-feature-interval-seconds", type=int, default=1)
     run_parser.set_defaults(handler=cmd_run)
 
     auth_parser = subparsers.add_parser("auth", help="Authenticate with Project X")
@@ -93,6 +110,16 @@ def build_parser() -> ArgumentParser:
     bootstrap.add_argument("--unit-number", type=int, default=1)
     bootstrap.add_argument("--live", action="store_true")
     bootstrap.set_defaults(handler=cmd_bootstrap)
+
+    backfill = subparsers.add_parser(
+        "backfill", help="Backfill missing historical Project X bars"
+    )
+    backfill.add_argument("--symbol", default="MNQ")
+    backfill.add_argument("--days", type=int, default=30)
+    backfill.add_argument("--unit", default="minute", choices=sorted(_unit_choices()))
+    backfill.add_argument("--unit-number", type=int, default=1)
+    backfill.add_argument("--live", action="store_true")
+    backfill.set_defaults(handler=cmd_backfill)
 
     qa = subparsers.add_parser("qa", help="Data quality reports")
     qa_subparsers = qa.add_subparsers(dest="qa_command", required=True)
@@ -144,7 +171,23 @@ def build_parser() -> ArgumentParser:
     record.add_argument("--symbol", default="MNQ")
     record.add_argument("--events", default="quotes,trades,depth")
     record.add_argument("--duration-seconds", type=int)
+    record.add_argument("--no-live-features", action="store_true")
+    record.add_argument("--feature-windows", default="1,5,30,60")
+    record.add_argument("--feature-interval-seconds", type=int, default=1)
     record.set_defaults(handler=cmd_record)
+
+    features = subparsers.add_parser("features", help="Build model-ready feature tables")
+    feature_subparsers = features.add_subparsers(dest="features_command", required=True)
+
+    intraday = feature_subparsers.add_parser(
+        "intraday", help="Build fixed-window intraday quote/trade/depth features"
+    )
+    intraday.add_argument("--quote-path", help="Specific bronze quotes CSV path")
+    intraday.add_argument("--windows", default="1,5,30,60")
+    intraday.add_argument("--horizons", default="5,30,60")
+    intraday.add_argument("--interval-seconds", type=int, default=1)
+    intraday.add_argument("--max-stale-quote-seconds", type=int, default=5)
+    intraday.set_defaults(handler=cmd_features_intraday)
 
     return parser
 
@@ -174,17 +217,57 @@ def authenticated_client(settings: Settings) -> ProjectXClient:
 
 
 def cmd_run(args: Namespace) -> int:
+    settings = Settings.from_env()
+    client: ProjectXClient | None = None
+    backfill_contract_id: str | None = None
+
     if not args.skip_auth:
         print_section("Project X Auth")
-        auth_code = cmd_auth(Namespace())
-        if auth_code:
-            return auth_code
+        client = authenticated_client(settings)
+        print(f"Authenticated. Token prefix: {client.token[:12]}...")
+        client.validate_session()
+        print("Session validated.")
+
+    if not args.skip_backfill:
+        print_section("Historical Backfill")
+        if client is None:
+            client = authenticated_client(settings)
+        backfill_result = run_historical_backfill(
+            settings=settings,
+            client=client,
+            symbol=args.backfill_symbol,
+            days=args.backfill_days,
+            unit=parse_bar_unit(args.backfill_unit),
+            unit_number=args.backfill_unit_number,
+            live=settings.projectx_live,
+        )
+        backfill_contract_id = backfill_result.contract.id
+        print_backfill_result(backfill_result)
 
     if not args.skip_normalize:
         print_section("Normalize")
         normalize_code = cmd_normalize_all(Namespace())
         if normalize_code:
             return normalize_code
+
+    if not args.skip_features:
+        print_section("Features")
+        try:
+            features_code = cmd_features_intraday(
+                Namespace(
+                    quote_path=None,
+                    windows=args.feature_windows,
+                    horizons=args.feature_horizons,
+                    interval_seconds=args.feature_interval_seconds,
+                    max_stale_quote_seconds=args.feature_max_stale_quote_seconds,
+                )
+            )
+            if features_code:
+                return features_code
+        except ValueError as exc:
+            if "No bronze quote CSV found" not in str(exc):
+                raise
+            print(f"skipped features: {exc}")
 
     if not args.skip_qa:
         print_section("QA")
@@ -196,12 +279,16 @@ def cmd_run(args: Namespace) -> int:
 
     if not args.skip_record:
         print_section("Live Recording")
+        record_contract_id = args.record_contract_id or backfill_contract_id
         record_code = cmd_record(
             Namespace(
-                contract_id=args.record_contract_id,
+                contract_id=record_contract_id,
                 symbol=args.record_symbol,
                 events=args.record_events,
                 duration_seconds=args.record_duration_seconds,
+                no_live_features=args.record_no_live_features,
+                feature_windows=args.record_feature_windows,
+                feature_interval_seconds=args.record_feature_interval_seconds,
             )
         )
         if record_code:
@@ -219,6 +306,46 @@ def cmd_auth(_: Namespace) -> int:
     client.validate_session()
     print("Session validated.")
     return 0
+
+
+def cmd_backfill(args: Namespace) -> int:
+    settings = Settings.from_env()
+    client = authenticated_client(settings)
+    result = run_historical_backfill(
+        settings=settings,
+        client=client,
+        symbol=args.symbol,
+        days=args.days,
+        unit=parse_bar_unit(args.unit),
+        unit_number=args.unit_number,
+        live=args.live or settings.projectx_live,
+    )
+    print_backfill_result(result)
+    return 0
+
+
+def run_historical_backfill(
+    *,
+    settings: Settings,
+    client: ProjectXClient,
+    symbol: str,
+    days: int,
+    unit: BarUnit,
+    unit_number: int,
+    live: bool,
+) -> HistoryBackfillResult:
+    contract = resolve_active_contract(client, symbol=symbol, live=live)
+    print(f"Selected {contract.name} ({contract.id}) - {contract.description}")
+    return backfill_historical_bars(
+        client=client,
+        data_dir=settings.data_dir,
+        symbol=symbol,
+        contract=contract,
+        unit=unit,
+        unit_number=unit_number,
+        initial_days=days,
+        live=live,
+    )
 
 
 def cmd_contract_search(args: Namespace) -> int:
@@ -409,10 +536,21 @@ def cmd_qa_realtime(args: Namespace) -> int:
 def cmd_qa_all(args: Namespace) -> int:
     bar_args = Namespace(path=None, tick_size=args.tick_size, json=False, no_write=args.no_write)
     realtime_args = Namespace(dir=None, json=False, no_write=args.no_write)
-    bars_code = cmd_qa_bars(bar_args)
+    codes: list[int] = []
+    try:
+        codes.append(cmd_qa_bars(bar_args))
+    except ValueError as exc:
+        if "No bars CSV found" not in str(exc):
+            raise
+        print(f"skipped bars QA: {exc}")
     print()
-    realtime_code = cmd_qa_realtime(realtime_args)
-    return max(bars_code, realtime_code)
+    try:
+        codes.append(cmd_qa_realtime(realtime_args))
+    except ValueError as exc:
+        if "No real-time capture directory found" not in str(exc):
+            raise
+        print(f"skipped real-time QA: {exc}")
+    return max(codes) if codes else 0
 
 
 def cmd_normalize_bars(args: Namespace) -> int:
@@ -444,10 +582,22 @@ def cmd_normalize_realtime(args: Namespace) -> int:
 
 
 def cmd_normalize_all(_: Namespace) -> int:
-    bars_code = cmd_normalize_bars(Namespace(path=None))
+    settings = Settings.from_env()
+    history_outputs = normalize_history_dir(settings.data_dir)
+    if history_outputs:
+        append_manifest(settings.data_dir, history_outputs)
+        print_normalized_files(history_outputs)
+    else:
+        print("No raw historical bar files found.")
     print()
-    realtime_code = cmd_normalize_realtime(Namespace(dir=None))
-    return max(bars_code, realtime_code)
+    realtime_dir = find_latest_realtime_dir(settings.data_dir)
+    if realtime_dir is None:
+        print("No raw real-time capture directory found.")
+        return 0
+    realtime_outputs = normalize_realtime_dir(realtime_dir, settings.data_dir)
+    append_manifest(settings.data_dir, realtime_outputs)
+    print_normalized_files(realtime_outputs)
+    return 0
 
 
 def cmd_record(args: Namespace) -> int:
@@ -475,8 +625,33 @@ def cmd_record(args: Namespace) -> int:
             events=args.events,
             data_dir=settings.data_dir,
             duration_seconds=args.duration_seconds,
+            live_features=not args.no_live_features,
+            feature_windows=args.feature_windows,
+            feature_interval_seconds=args.feature_interval_seconds,
         )
     )
+
+
+def cmd_features_intraday(args: Namespace) -> int:
+    settings = Settings.from_env()
+    result = build_intraday_features(
+        IntradayFeatureConfig(
+            data_dir=settings.data_dir,
+            quote_path=Path(args.quote_path) if args.quote_path else None,
+            windows_seconds=parse_int_list(args.windows),
+            horizons_seconds=parse_int_list(args.horizons),
+            interval_seconds=args.interval_seconds,
+            max_stale_quote_seconds=args.max_stale_quote_seconds,
+        )
+    )
+    print(f"intraday features: {result.rows:,} rows")
+    print(f"  quotes: {result.quote_path}")
+    if result.trade_path:
+        print(f"  trades: {result.trade_path}")
+    if result.depth_path:
+        print(f"  depth: {result.depth_path}")
+    print(f"  output: {result.path}")
+    return 0
 
 
 def resolve_active_contract(
@@ -507,6 +682,33 @@ def print_normalized_files(outputs: list[object]) -> None:
         print(f"{output.name}: {output.rows:,} rows")
         print(f"  source: {output.source}")
         print(f"  output: {output.path}")
+
+
+def print_backfill_result(result: HistoryBackfillResult) -> None:
+    print(
+        f"{result.symbol} {result.contract.name} {result.unit.name.lower()}_"
+        f"{result.unit_number}: {compact_utc(result.start)} to {compact_utc(result.end)}"
+    )
+    if result.skipped:
+        print(f"  skipped: {result.reason}")
+    else:
+        print(f"  downloaded bars: {result.bars:,}")
+        print(f"  raw files: {len(result.raw_files):,}")
+        for raw_file in result.raw_files:
+            print(f"    {raw_file}")
+    print(f"  state: {result.state_path}")
+
+
+def parse_int_list(value: str) -> list[int]:
+    parsed: list[int] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        parsed.append(int(item))
+    if not parsed:
+        raise ValueError("Expected at least one integer value.")
+    return parsed
 
 
 def print_section(title: str) -> None:

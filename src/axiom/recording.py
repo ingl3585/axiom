@@ -13,6 +13,9 @@ class RecordingConfig:
     events: str = "quotes,trades,depth"
     data_dir: Path = Path("data")
     duration_seconds: int | None = None
+    live_features: bool = True
+    feature_windows: str = "1,5,30,60"
+    feature_interval_seconds: int = 1
 
 
 def find_node_executable() -> str:
@@ -59,10 +62,15 @@ def run_realtime_recorder(config: RecordingConfig) -> int:
     ]
     if config.duration_seconds is not None:
         command.extend(["--duration-seconds", str(config.duration_seconds)])
+    if config.live_features:
+        command.append("--live-features")
+    else:
+        command.append("--no-live-features")
+    command.extend(["--feature-windows", config.feature_windows])
+    command.extend(["--feature-interval-seconds", str(config.feature_interval_seconds)])
 
     try:
         return subprocess.run(command, check=False).returncode
     except KeyboardInterrupt:
         print("\nRecording stopped by user.", file=sys.stderr)
         return 130
-

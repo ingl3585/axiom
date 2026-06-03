@@ -92,6 +92,14 @@ class FeatureTests(unittest.TestCase):
             self.assertEqual(rows[1]["depth_updates_1s"], "1.0")
             self.assertNotEqual(rows[0]["forward_return_1s"], "")
 
+            # Mid rises 0.5 (2 ticks at 0.25) each second, so MFE == MAE == 2.0.
+            self.assertEqual(rows[0]["forward_mfe_ticks_1s"], "2.0")
+            self.assertEqual(rows[0]["forward_mae_ticks_1s"], "2.0")
+            self.assertGreater(float(rows[0]["forward_realized_vol_1s"]), 0.0)
+            # The final bucket has no future bucket, so forward labels are blank.
+            self.assertEqual(rows[2]["forward_return_1s"], "")
+            self.assertEqual(rows[2]["forward_mfe_ticks_1s"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -201,6 +201,7 @@ class LiveFeatureEngine {
     const observedMs = Date.parse(observedAt);
     if (!Number.isFinite(observedMs)) return;
     for (const record of recordList(data)) {
+      if (record == null || typeof record !== "object") continue;
       if (target === "GatewayQuote") {
         this.onQuote(observedMs, record);
       } else if (target === "GatewayTrade") {

@@ -173,7 +173,8 @@ function parseTimestamp(value) {
 }
 
 function recordList(data) {
-  if (Array.isArray(data)) return data;
+  // Project X depth batches can contain null placeholders; live features only use records.
+  if (Array.isArray(data)) return data.filter((item) => item && typeof item === "object");
   if (data && typeof data === "object") return [data];
   return [];
 }

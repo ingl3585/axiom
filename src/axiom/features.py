@@ -12,7 +12,7 @@ from .storage import ensure_parent
 
 
 DEFAULT_WINDOWS = [1, 5, 30, 60]
-DEFAULT_HORIZONS = [5, 30, 60]
+DEFAULT_HORIZONS = [5, 15, 30, 60]
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,7 @@ class IntradayFeatureConfig:
     horizons_seconds: list[int] | None = None
     interval_seconds: int = 1
     max_stale_quote_seconds: int = 5
+    tick_size: float = 0.25
 
 
 def build_intraday_features(config: IntradayFeatureConfig) -> FeatureBuildResult:
@@ -165,6 +166,22 @@ def build_intraday_features(config: IntradayFeatureConfig) -> FeatureBuildResult
                 index,
                 future_index,
                 config.max_stale_quote_seconds,
+            )
+            mfe, mae = forward_excursion_ticks(
+                mid,
+                seconds_since_quote,
+                index,
+                future_index,
+                config.max_stale_quote_seconds,
+                config.tick_size,
+            )
+            row[f"forward_mfe_ticks_{horizon}s"] = mfe
+            row[f"forward_mae_ticks_{horizon}s"] = mae
+            row[f"forward_realized_vol_{horizon}s"] = forward_realized_vol(
+                log_return_sq_prefix,
+                index,
+                future_index,
+                bucket_count,
             )
 
         rows.append(row)
@@ -311,6 +328,50 @@ def forward_return(
     return mid[future_index] / mid[index] - 1
 
 
+def forward_excursion_ticks(
+    mid: list[float | None],
+    seconds_since_quote: list[int | None],
+    index: int,
+    future_index: int,
+    max_stale_quote_seconds: int,
+    tick_size: float,
+) -> tuple[float | str, float | str]:
+    """Max favorable / adverse excursion (in ticks) over the forward window.
+
+    MFE is the largest mid advance above the snapshot mid; MAE is the largest
+    decline below it. Both are signed (MFE >= 0, MAE <= 0) and only consider
+    buckets backed by a fresh quote so labels never read stale prices.
+    """
+    base = mid[index]
+    if not 0 <= future_index < len(mid) or not base or tick_size <= 0:
+        return "", ""
+    highest: float | None = None
+    lowest: float | None = None
+    for forward in range(index + 1, future_index + 1):
+        price = mid[forward]
+        stale = seconds_since_quote[forward]
+        if price is None or stale is None or stale > max_stale_quote_seconds:
+            continue
+        highest = price if highest is None else max(highest, price)
+        lowest = price if lowest is None else min(lowest, price)
+    if highest is None or lowest is None:
+        return "", ""
+    return (highest - base) / tick_size, (lowest - base) / tick_size
+
+
+def forward_realized_vol(
+    log_return_sq_prefix: list[float],
+    index: int,
+    future_index: int,
+    bucket_count: int,
+) -> float | str:
+    """Realized volatility (sqrt of summed squared log returns) ahead of index."""
+    if not 0 <= future_index < bucket_count or future_index <= index:
+        return ""
+    variance = window_sum(log_return_sq_prefix, index + 1, future_index)
+    return math.sqrt(variance) if variance > 0 else 0.0
+
+
 def feature_fieldnames(
     windows: list[int],
     horizons: list[int],
@@ -340,7 +401,15 @@ def feature_fieldnames(
         )
         fields.extend(f"{key}_{window}s" for key in depth_type_keys)
         fields.extend([f"return_{window}s", f"realized_vol_{window}s"])
-    fields.extend(f"forward_return_{horizon}s" for horizon in horizons)
+    for horizon in horizons:
+        fields.extend(
+            [
+                f"forward_return_{horizon}s",
+                f"forward_mfe_ticks_{horizon}s",
+                f"forward_mae_ticks_{horizon}s",
+                f"forward_realized_vol_{horizon}s",
+            ]
+        )
     return fields
 
 

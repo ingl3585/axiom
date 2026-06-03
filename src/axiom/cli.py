@@ -26,12 +26,15 @@ from .projectx import (
 )
 from .qa import (
     analyze_bars_csv,
+    analyze_bars_partition,
     analyze_realtime_dir,
+    find_latest_bars_partition,
     find_latest_file,
     find_latest_realtime_dir,
     write_report_pair,
 )
 from .recording import RecordingConfig, run_realtime_recorder
+from .research import analyze_feature_ic
 from .storage import bars_csv_path, history_raw_path, write_bars_csv, write_json
 
 
@@ -184,10 +187,28 @@ def build_parser() -> ArgumentParser:
     )
     intraday.add_argument("--quote-path", help="Specific bronze quotes CSV path")
     intraday.add_argument("--windows", default="1,5,30,60")
-    intraday.add_argument("--horizons", default="5,30,60")
+    intraday.add_argument("--horizons", default="5,15,30,60")
     intraday.add_argument("--interval-seconds", type=int, default=1)
     intraday.add_argument("--max-stale-quote-seconds", type=int, default=5)
+    intraday.add_argument("--tick-size", type=float, default=0.25)
     intraday.set_defaults(handler=cmd_features_intraday)
+
+    research = subparsers.add_parser(
+        "research", help="Feature/label research diagnostics"
+    )
+    research_subparsers = research.add_subparsers(
+        dest="research_command", required=True
+    )
+
+    ic = research_subparsers.add_parser(
+        "ic", help="Information coefficient of features vs forward-return labels"
+    )
+    ic.add_argument("--path", help="Specific silver features CSV path")
+    ic.add_argument("--min-samples", type=int, default=30)
+    ic.add_argument("--top", type=int, default=15, help="Rows per label in the table")
+    ic.add_argument("--json", action="store_true", help="Print JSON instead of Markdown")
+    ic.add_argument("--no-write", action="store_true", help="Do not write report files")
+    ic.set_defaults(handler=cmd_research_ic)
 
     return parser
 
@@ -260,6 +281,7 @@ def cmd_run(args: Namespace) -> int:
                     horizons=args.feature_horizons,
                     interval_seconds=args.feature_interval_seconds,
                     max_stale_quote_seconds=args.feature_max_stale_quote_seconds,
+                    tick_size=args.tick_size,
                 )
             )
             if features_code:
@@ -483,13 +505,17 @@ def cmd_bootstrap(args: Namespace) -> int:
 
 def cmd_qa_bars(args: Namespace) -> int:
     settings = Settings.from_env()
-    path = Path(args.path) if args.path else find_latest_file(
-        settings.data_dir / "bronze" / "projectx" / "bars", "*.csv"
-    )
-    if path is None:
-        raise ValueError("No bars CSV found. Run `axiom bootstrap` or pass --path.")
-
-    report = analyze_bars_csv(path, tick_size=args.tick_size)
+    if args.path:
+        report = analyze_bars_csv(Path(args.path), tick_size=args.tick_size)
+    else:
+        partition = find_latest_bars_partition(
+            settings.data_dir / "bronze" / "projectx" / "bars"
+        )
+        if partition is None:
+            raise ValueError(
+                "No bars CSV found. Run `axiom backfill`/`normalize` or pass --path."
+            )
+        report = analyze_bars_partition(partition, tick_size=args.tick_size)
     if args.json:
         print(json.dumps(report.to_dict(), indent=2))
     else:
@@ -642,6 +668,7 @@ def cmd_features_intraday(args: Namespace) -> int:
             horizons_seconds=parse_int_list(args.horizons),
             interval_seconds=args.interval_seconds,
             max_stale_quote_seconds=args.max_stale_quote_seconds,
+            tick_size=args.tick_size,
         )
     )
     print(f"intraday features: {result.rows:,} rows")
@@ -651,6 +678,34 @@ def cmd_features_intraday(args: Namespace) -> int:
     if result.depth_path:
         print(f"  depth: {result.depth_path}")
     print(f"  output: {result.path}")
+    return 0
+
+
+def cmd_research_ic(args: Namespace) -> int:
+    settings = Settings.from_env()
+    path = Path(args.path) if args.path else find_latest_file(
+        settings.data_dir / "silver" / "projectx" / "features", "*.csv"
+    )
+    if path is None:
+        raise ValueError(
+            "No silver features CSV found. Run `axiom features intraday` or pass --path."
+        )
+
+    report = analyze_feature_ic(path, min_samples=args.min_samples)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.to_markdown(top=args.top))
+
+    if not args.no_write:
+        stem = f"ic_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+        md_path, json_path = write_report_pair(
+            settings.data_dir / "reports" / "research",
+            stem,
+            report.to_markdown(top=args.top),
+            report.to_dict(),
+        )
+        print(f"Saved reports: {md_path}, {json_path}")
     return 0
 
 

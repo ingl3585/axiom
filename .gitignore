@@ -7,6 +7,7 @@ __pycache__/
 *.egg-info/
 
 .env
+.claude
 data/
 logs/
 

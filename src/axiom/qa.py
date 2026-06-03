@@ -183,6 +183,54 @@ class BarsQa:
 def analyze_bars_csv(path: Path, tick_size: float = 0.25) -> BarsQa:
     with path.open(encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
+    return analyze_bars_rows(rows, path, tick_size=tick_size)
+
+
+def find_latest_bars_partition(bars_root: Path) -> Path | None:
+    """Return the contract/unit partition whose newest CSV was written last.
+
+    Bronze bars are stored one CSV per backfill window, so picking the newest
+    file by mtime (as ``find_latest_file`` does) usually lands on the smallest
+    tail window. QA should instead look at a whole stitched partition.
+    """
+    if not bars_root.exists():
+        return None
+    partitions = [
+        path
+        for path in bars_root.rglob("unit=*")
+        if path.is_dir() and any(path.glob("*.csv"))
+    ]
+    if not partitions:
+        return None
+    return max(partitions, key=_partition_mtime)
+
+
+def _partition_mtime(partition: Path) -> float:
+    return max(csv_path.stat().st_mtime for csv_path in partition.glob("*.csv"))
+
+
+def stitch_bars_rows(partition_dir: Path) -> list[dict[str, Any]]:
+    """Concatenate every CSV in a partition, de-duped by timestamp and sorted."""
+    combined: dict[str, dict[str, Any]] = {}
+    for csv_path in sorted(partition_dir.glob("*.csv")):
+        with csv_path.open(encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                key = str(row.get("t") or "")
+                if key:
+                    combined[key] = row
+    return [combined[key] for key in sorted(combined)]
+
+
+def analyze_bars_partition(partition_dir: Path, tick_size: float = 0.25) -> BarsQa:
+    rows = stitch_bars_rows(partition_dir)
+    return analyze_bars_rows(rows, partition_dir, tick_size=tick_size)
+
+
+def analyze_bars_rows(
+    rows: list[dict[str, Any]],
+    label: Path,
+    tick_size: float = 0.25,
+) -> BarsQa:
     timestamps: list[datetime] = []
     volumes: list[float] = []
     closes: list[float] = []
@@ -215,7 +263,7 @@ def analyze_bars_csv(path: Path, tick_size: float = 0.25) -> BarsQa:
 
     non_monotonic_steps = 0
     gaps: list[tuple[datetime, datetime, int]] = []
-    expected_step_seconds = infer_expected_step_seconds(path, timestamps)
+    expected_step_seconds = infer_expected_step_seconds(label, timestamps)
     for previous, current in zip(timestamps, timestamps[1:]):
         delta_seconds = int((current - previous).total_seconds())
         if delta_seconds <= 0:
@@ -230,7 +278,7 @@ def analyze_bars_csv(path: Path, tick_size: float = 0.25) -> BarsQa:
 
     unique_timestamps = len(set(timestamps))
     return BarsQa(
-        path=path,
+        path=label,
         rows=len(rows),
         unique_timestamps=unique_timestamps,
         duplicate_timestamps=len(timestamps) - unique_timestamps,
@@ -288,7 +336,8 @@ class EventQa:
     frames: int = 0
     parse_errors: int = 0
     payload_records: int = 0
-    invalid_event_timestamps: int = 0
+    placeholder_event_timestamps: int = 0
+    missing_event_timestamps: int = 0
     observed_start: datetime | None = None
     observed_end: datetime | None = None
     event_start: datetime | None = None
@@ -300,6 +349,10 @@ class EventQa:
     trade_prices: list[float] = field(default_factory=list)
     trade_types: Counter[int] = field(default_factory=Counter)
     depth_types: Counter[int] = field(default_factory=Counter)
+
+    @property
+    def invalid_event_timestamps(self) -> int:
+        return self.placeholder_event_timestamps + self.missing_event_timestamps
 
     def duration_seconds(self) -> float | None:
         if not self.observed_start or not self.observed_end:
@@ -325,6 +378,8 @@ class EventQa:
             "frames": self.frames,
             "parse_errors": self.parse_errors,
             "payload_records": self.payload_records,
+            "placeholder_event_timestamps": self.placeholder_event_timestamps,
+            "missing_event_timestamps": self.missing_event_timestamps,
             "placeholder_or_invalid_event_timestamps": self.invalid_event_timestamps,
             "observed_start": fmt_dt(self.observed_start),
             "observed_end": fmt_dt(self.observed_end),
@@ -376,8 +431,12 @@ class RealtimeQa:
                     f"- Payload records: {event.payload_records:,}",
                     f"- Parse errors: {event.parse_errors:,}",
                     (
-                        "- Placeholder/invalid event timestamps: "
-                        f"{event.invalid_event_timestamps:,}"
+                        "- Placeholder event timestamps (book-snapshot sentinel): "
+                        f"{event.placeholder_event_timestamps:,}"
+                    ),
+                    (
+                        "- Missing/invalid event timestamps: "
+                        f"{event.missing_event_timestamps:,}"
                     ),
                     f"- Observed start: {fmt_dt(event.observed_start)}",
                     f"- Observed end: {fmt_dt(event.observed_end)}",
@@ -447,7 +506,10 @@ def analyze_event_file(name: str, path: Path) -> EventQa:
                 qa.payload_records += 1
                 event_time = event_timestamp(name, record)
                 if event_time is None:
-                    qa.invalid_event_timestamps += 1
+                    if is_placeholder_timestamp(raw_event_timestamp(name, record)):
+                        qa.placeholder_event_timestamps += 1
+                    else:
+                        qa.missing_event_timestamps += 1
                 else:
                     update_dt_range(qa, "event", event_time)
                     if observed_at:
@@ -477,10 +539,21 @@ def update_dt_range(qa: EventQa, prefix: str, value: datetime | None) -> None:
         setattr(qa, end_name, value)
 
 
-def event_timestamp(name: str, record: dict[str, Any]) -> datetime | None:
+def raw_event_timestamp(name: str, record: dict[str, Any]) -> str:
     if name == "quotes":
-        return parse_dt(str(record.get("lastUpdated") or record.get("timestamp") or ""))
-    return parse_dt(str(record.get("timestamp") or record.get("lastUpdated") or ""))
+        return str(record.get("lastUpdated") or record.get("timestamp") or "")
+    return str(record.get("timestamp") or record.get("lastUpdated") or "")
+
+
+def event_timestamp(name: str, record: dict[str, Any]) -> datetime | None:
+    return parse_dt(raw_event_timestamp(name, record))
+
+
+def is_placeholder_timestamp(text: str) -> bool:
+    # Project X emits .NET DateTime.MinValue (0001-01-01) on records that carry
+    # no per-record time, e.g. order-book snapshot levels. That is expected, not
+    # a recorder fault, so it is tracked separately from truly missing values.
+    return text.strip().startswith("0001-01-01")
 
 
 def analyze_quote_record(qa: EventQa, record: dict[str, Any]) -> None:

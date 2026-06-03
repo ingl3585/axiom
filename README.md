@@ -138,6 +138,8 @@ Or inspect either side independently:
 
 Reports are written to `data/reports/qa/` as Markdown and JSON.
 
+`qa bars` stitches every CSV in the latest contract/unit partition (de-duped by timestamp) and reports on the whole span, rather than the newest single backfill window — so an empty or tiny tail file no longer makes the data look worse than it is. Pass `--path` to QA a specific CSV instead.
+
 ## Normalization
 
 Normalize raw Project X captures into stable bronze CSV tables:
@@ -173,9 +175,25 @@ Build fixed-window intraday features from bronze quote, trade, and depth tables:
 .\.venv\Scripts\python.exe main.py features intraday
 ```
 
-The first feature table is written under `data/silver/projectx/features/intraday/`. It includes 1s, 5s, 30s, and 60s trailing windows by default, plus 5s, 30s, and 60s forward-return labels.
+The first feature table is written under `data/silver/projectx/features/intraday/`. It includes 1s, 5s, 30s, and 60s trailing windows by default. Each row also carries forward-looking labels at the 5s, 15s, 30s, and 60s horizons:
+
+- `forward_return_{h}s` — mid-price return over the next `h` seconds
+- `forward_mfe_ticks_{h}s` / `forward_mae_ticks_{h}s` — max favorable / adverse excursion in ticks
+- `forward_realized_vol_{h}s` — realized volatility over the forward window
+
+All labels reuse the same quote-staleness gate as the features, so they never read a stale or missing future quote.
 
 During live recording, rolling feature snapshots are written under `data/live/projectx/features/`. These are not trading signals yet; they are the live feature vectors that a future signal/risk/execution engine can consume.
+
+## Feature Research
+
+Before building any signal, check whether features actually carry predictive value. This computes the information coefficient (Spearman rank correlation) and a top-vs-bottom quintile spread for every feature against each forward label:
+
+```powershell
+.\.venv\Scripts\python.exe main.py research ic
+```
+
+Reports are written to `data/reports/research/` as Markdown and JSON. Forward windows overlap and are autocorrelated, so treat `|IC|` as a ranking signal for further investigation, not a significance test.
 
 ## Data Layout
 

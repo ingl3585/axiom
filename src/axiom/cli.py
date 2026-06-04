@@ -35,6 +35,7 @@ from .qa import (
 )
 from .recording import RecordingConfig, run_realtime_recorder
 from .research import analyze_feature_ic
+from .session import analyze_session
 from .storage import bars_csv_path, history_raw_path, write_bars_csv, write_json
 
 
@@ -73,8 +74,11 @@ def build_parser() -> ArgumentParser:
     run_parser.add_argument("--record-events", default="quotes,trades,depth")
     run_parser.add_argument("--record-duration-seconds", type=int)
     run_parser.add_argument("--record-no-live-features", action="store_true")
+    run_parser.add_argument("--record-no-session-summary", action="store_true")
     run_parser.add_argument("--record-feature-windows", default="1,5,30,60")
     run_parser.add_argument("--record-feature-interval-seconds", type=int, default=1)
+    run_parser.add_argument("--session-gap-threshold-seconds", type=float, default=10.0)
+    run_parser.add_argument("--session-stale-quote-seconds", type=float, default=5.0)
     run_parser.set_defaults(handler=cmd_run)
 
     auth_parser = subparsers.add_parser("auth", help="Authenticate with Project X")
@@ -175,9 +179,23 @@ def build_parser() -> ArgumentParser:
     record.add_argument("--events", default="quotes,trades,depth")
     record.add_argument("--duration-seconds", type=int)
     record.add_argument("--no-live-features", action="store_true")
+    record.add_argument("--no-session-summary", action="store_true")
     record.add_argument("--feature-windows", default="1,5,30,60")
     record.add_argument("--feature-interval-seconds", type=int, default=1)
+    record.add_argument("--session-gap-threshold-seconds", type=float, default=10.0)
+    record.add_argument("--session-stale-quote-seconds", type=float, default=5.0)
     record.set_defaults(handler=cmd_record)
+
+    session = subparsers.add_parser(
+        "session", help="Summarize the latest real-time capture session"
+    )
+    session.add_argument("--dir", help="Specific real-time capture directory")
+    session.add_argument("--since", help="UTC ISO timestamp to filter observed rows")
+    session.add_argument("--gap-threshold-seconds", type=float, default=10.0)
+    session.add_argument("--stale-quote-seconds", type=float, default=5.0)
+    session.add_argument("--json", action="store_true", help="Print JSON instead of Markdown")
+    session.add_argument("--no-write", action="store_true", help="Do not write report files")
+    session.set_defaults(handler=cmd_session)
 
     features = subparsers.add_parser("features", help="Build model-ready feature tables")
     feature_subparsers = features.add_subparsers(dest="features_command", required=True)
@@ -309,8 +327,11 @@ def cmd_run(args: Namespace) -> int:
                 events=args.record_events,
                 duration_seconds=args.record_duration_seconds,
                 no_live_features=args.record_no_live_features,
+                no_session_summary=args.record_no_session_summary,
                 feature_windows=args.record_feature_windows,
                 feature_interval_seconds=args.record_feature_interval_seconds,
+                session_gap_threshold_seconds=args.session_gap_threshold_seconds,
+                session_stale_quote_seconds=args.session_stale_quote_seconds,
             )
         )
         if record_code:
@@ -645,7 +666,8 @@ def cmd_record(args: Namespace) -> int:
         else f"Recording real-time Project X data for {args.duration_seconds} seconds."
     )
     sys.stdout.flush()
-    return run_realtime_recorder(
+    recording_started_at = datetime.now(UTC)
+    code = run_realtime_recorder(
         RecordingConfig(
             contract_id=contract_id,
             events=args.events,
@@ -656,6 +678,21 @@ def cmd_record(args: Namespace) -> int:
             feature_interval_seconds=args.feature_interval_seconds,
         )
     )
+    if not args.no_session_summary:
+        print_section("Session Health")
+        try:
+            write_session_report(
+                settings=settings,
+                directory=None,
+                gap_threshold_seconds=args.session_gap_threshold_seconds,
+                stale_quote_seconds=args.session_stale_quote_seconds,
+                observed_since=recording_started_at,
+                as_json=False,
+                write=True,
+            )
+        except ValueError as exc:
+            print(f"skipped session health: {exc}")
+    return code
 
 
 def cmd_features_intraday(args: Namespace) -> int:
@@ -703,6 +740,53 @@ def cmd_research_ic(args: Namespace) -> int:
             settings.data_dir / "reports" / "research",
             stem,
             report.to_markdown(top=args.top),
+            report.to_dict(),
+        )
+        print(f"Saved reports: {md_path}, {json_path}")
+    return 0
+
+
+def cmd_session(args: Namespace) -> int:
+    settings = Settings.from_env()
+    return write_session_report(
+        settings=settings,
+        directory=Path(args.dir) if args.dir else None,
+        gap_threshold_seconds=args.gap_threshold_seconds,
+        stale_quote_seconds=args.stale_quote_seconds,
+        observed_since=parse_utc_datetime(args.since) if args.since else None,
+        as_json=args.json,
+        write=not args.no_write,
+    )
+
+
+def write_session_report(
+    *,
+    settings: Settings,
+    directory: Path | None,
+    gap_threshold_seconds: float,
+    stale_quote_seconds: float,
+    observed_since: datetime | None,
+    as_json: bool,
+    write: bool,
+) -> int:
+    report = analyze_session(
+        settings.data_dir,
+        directory=directory,
+        gap_threshold_seconds=gap_threshold_seconds,
+        stale_quote_seconds=stale_quote_seconds,
+        observed_since=observed_since,
+    )
+    if as_json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.to_markdown())
+
+    if write:
+        stem = f"session_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+        md_path, json_path = write_report_pair(
+            settings.data_dir / "reports" / "session",
+            stem,
+            report.to_markdown(),
             report.to_dict(),
         )
         print(f"Saved reports: {md_path}, {json_path}")

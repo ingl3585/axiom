@@ -52,6 +52,8 @@ You can also run the project through `main.py`:
 
 By default, `main.py` runs Project X auth, backfills missing MNQ historical bars, normalizes the latest raw data, builds intraday feature rows, writes fresh QA reports, then starts recording live Project X market data. While recording, it also writes rolling live feature snapshots. It keeps running until you press `Ctrl+C`.
 
+When recording stops, Axiom prints and writes a session health report covering raw event counts, capture gaps, spread/volume stats, and live feature rows.
+
 For a short smoke test:
 
 ```powershell
@@ -120,6 +122,16 @@ Or use the Windows wrapper:
 ```
 
 If `node` is not on PATH, use your installed Node executable or the Codex bundled runtime.
+
+## Session Health
+
+Summarize the latest real-time capture and matching live feature snapshots:
+
+```powershell
+.\.venv\Scripts\python.exe main.py session
+```
+
+Reports are written to `data/reports/session/` as Markdown and JSON. The normal `main.py` run also writes one automatically after the recorder exits.
 
 ## Data QA
 
@@ -246,6 +258,8 @@ data/
     history_state.json
   reports/
     qa/
+    research/
+    session/
 ```
 
 Raw files are the audit trail. Bronze files are normalized enough for quick pandas/Polars/DuckDB analysis.

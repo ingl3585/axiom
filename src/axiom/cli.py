@@ -272,6 +272,17 @@ def build_parser() -> ArgumentParser:
     signals.add_argument("--tick-size", type=float, default=0.25)
     signals.add_argument("--cost-ticks", type=float, default=2.0)
     signals.add_argument("--max-match-lag-seconds", type=float, default=1.5)
+    signals.add_argument(
+        "--all-runs",
+        action="store_true",
+        help="Evaluate every row in the signal file instead of only the latest run",
+    )
+    signals.add_argument(
+        "--run-gap-seconds",
+        type=float,
+        default=120.0,
+        help="Timestamp gap used to split same-day signal files into runs",
+    )
     signals.add_argument("--json", action="store_true", help="Print JSON instead of Markdown")
     signals.add_argument("--no-write", action="store_true", help="Do not write report files")
     signals.set_defaults(handler=cmd_research_signals)
@@ -932,6 +943,8 @@ def cmd_research_signals(args: Namespace) -> int:
             tick_size=args.tick_size,
             cost_ticks=args.cost_ticks,
             max_match_lag_seconds=args.max_match_lag_seconds,
+            latest_run_only=not args.all_runs,
+            run_gap_seconds=args.run_gap_seconds,
         )
     )
     if args.json:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 import csv
 import json
@@ -9,7 +10,7 @@ import math
 from typing import Any
 
 from .backtest import CandidateBacktest, Trade
-from .qa import fmt_number, parse_dt
+from .qa import fmt_dt, fmt_number, parse_dt
 from .research import parse_float
 
 
@@ -21,6 +22,8 @@ class SignalEvaluationConfig:
     tick_size: float = 0.25
     cost_ticks: float = 2.0
     max_match_lag_seconds: float = 1.5
+    latest_run_only: bool = True
+    run_gap_seconds: float = 120.0
 
 
 @dataclass(frozen=True)
@@ -29,7 +32,11 @@ class SignalEvaluationReport:
     feature_path: Path
     horizon_seconds: int
     cost_ticks: float
+    source_signals: int
     total_signals: int
+    run_filter: str
+    run_start: datetime | None
+    run_end: datetime | None
     candidates: int
     evaluated_candidates: int
     unmatched_candidates: int
@@ -43,7 +50,11 @@ class SignalEvaluationReport:
             "feature_path": str(self.feature_path),
             "horizon_seconds": self.horizon_seconds,
             "cost_ticks": self.cost_ticks,
+            "source_signals": self.source_signals,
             "total_signals": self.total_signals,
+            "run_filter": self.run_filter,
+            "run_start": fmt_dt(self.run_start),
+            "run_end": fmt_dt(self.run_end),
             "candidates": self.candidates,
             "evaluated_candidates": self.evaluated_candidates,
             "unmatched_candidates": self.unmatched_candidates,
@@ -58,9 +69,12 @@ class SignalEvaluationReport:
             "",
             f"- Signal file: `{self.signal_path}`",
             f"- Feature file: `{self.feature_path}`",
+            f"- Run filter: {self.run_filter}",
             f"- Horizon: {self.horizon_seconds:,} seconds",
             f"- Cost: {fmt_number(self.cost_ticks)} ticks/candidate",
-            f"- Signals: {self.total_signals:,}",
+            f"- Raw signals in file: {self.source_signals:,}",
+            f"- Signals evaluated: {self.total_signals:,}",
+            f"- Evaluated span: {fmt_dt(self.run_start)} to {fmt_dt(self.run_end)}",
             f"- Candidates: {self.candidates:,}",
             f"- Evaluated candidates: {self.evaluated_candidates:,}",
             f"- Unmatched candidates: {self.unmatched_candidates:,}",
@@ -102,7 +116,15 @@ class SignalEvaluationReport:
 
 
 def evaluate_signal_file(config: SignalEvaluationConfig) -> SignalEvaluationReport:
-    signals = read_jsonl(config.signal_path)
+    raw_signals = read_jsonl(config.signal_path)
+    if config.latest_run_only:
+        signals = latest_signal_run(raw_signals, config.run_gap_seconds)
+        run_filter = f"latest run by timestamp gap > {fmt_number(config.run_gap_seconds)}s"
+    else:
+        signals = raw_signals
+        run_filter = "all runs"
+    run_start, run_end = signal_time_range(signals)
+
     features = read_feature_rows(config.feature_path)
     feature_times = [parse_dt(row.get("timestamp")) for row in features]
 
@@ -144,7 +166,11 @@ def evaluate_signal_file(config: SignalEvaluationConfig) -> SignalEvaluationRepo
         feature_path=config.feature_path,
         horizon_seconds=config.horizon_seconds,
         cost_ticks=config.cost_ticks,
+        source_signals=len(raw_signals),
         total_signals=len(signals),
+        run_filter=run_filter,
+        run_start=run_start,
+        run_end=run_end,
         candidates=candidates,
         evaluated_candidates=evaluated,
         unmatched_candidates=unmatched,
@@ -152,6 +178,44 @@ def evaluate_signal_file(config: SignalEvaluationConfig) -> SignalEvaluationRepo
         reason_counts=reason_counts,
         policy_results=policy_results,
     )
+
+
+def latest_signal_run(signals: list[dict[str, Any]], gap_seconds: float) -> list[dict[str, Any]]:
+    if not signals or gap_seconds <= 0:
+        return signals
+
+    timestamps = [parse_dt(str(row.get("timestamp") or "")) for row in signals]
+    latest_index = next(
+        (index for index in range(len(timestamps) - 1, -1, -1) if timestamps[index] is not None),
+        None,
+    )
+    if latest_index is None:
+        return signals
+
+    start_index = latest_index
+    later_timestamp = timestamps[latest_index]
+    for index in range(latest_index - 1, -1, -1):
+        current_timestamp = timestamps[index]
+        if current_timestamp is None:
+            start_index = index
+            continue
+        gap = (later_timestamp - current_timestamp).total_seconds()
+        if gap > gap_seconds:
+            break
+        start_index = index
+        later_timestamp = current_timestamp
+    return signals[start_index:]
+
+
+def signal_time_range(signals: list[dict[str, Any]]) -> tuple[datetime | None, datetime | None]:
+    timestamps = [
+        timestamp
+        for timestamp in (parse_dt(str(row.get("timestamp") or "")) for row in signals)
+        if timestamp is not None
+    ]
+    if not timestamps:
+        return None, None
+    return min(timestamps), max(timestamps)
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:

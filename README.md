@@ -235,7 +235,7 @@ Evaluate logged live candidate signals against finalized feature labels:
 .\.venv\Scripts\python.exe main.py research signals
 ```
 
-This grades `LONG_CANDIDATE` / `SHORT_CANDIDATE` rows from `data/live/projectx/signals/` using the latest silver feature labels and reports candidate counts, NO_TRADE reasons, win rate, net ticks, MFE/MAE, and unmatched candidates.
+This grades `LONG_CANDIDATE` / `SHORT_CANDIDATE` rows from the latest run in `data/live/projectx/signals/` using the latest silver feature labels and reports candidate counts, NO_TRADE reasons, win rate, net ticks, MFE/MAE, and unmatched candidates. Same-day signal files can contain multiple stopped-and-started runs; pass `--all-runs` to evaluate the whole file instead.
 
 ## Data Layout
 

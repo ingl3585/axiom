@@ -10,7 +10,7 @@ from axiom.signal_eval import SignalEvaluationConfig, evaluate_signal_file
 
 
 class SignalEvaluationTests(unittest.TestCase):
-    def test_evaluate_signal_file_scores_candidates_and_reasons(self) -> None:
+    def test_evaluate_signal_file_scores_all_runs_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             signal_path = root / "signals.jsonl"
@@ -26,9 +26,11 @@ class SignalEvaluationTests(unittest.TestCase):
                     tick_size=0.25,
                     cost_ticks=2.0,
                     max_match_lag_seconds=1.5,
+                    latest_run_only=False,
                 )
             )
 
+            self.assertEqual(report.source_signals, 4)
             self.assertEqual(report.total_signals, 4)
             self.assertEqual(report.candidates, 3)
             self.assertEqual(report.evaluated_candidates, 2)
@@ -42,6 +44,34 @@ class SignalEvaluationTests(unittest.TestCase):
             self.assertEqual(result.short_count, 1)
             self.assertEqual(result.total_net_ticks(), 4.0)
             self.assertIn("momentum_5s", report.to_markdown())
+
+    def test_evaluate_signal_file_defaults_to_latest_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            signal_path = root / "signals.jsonl"
+            feature_path = root / "features_1s.csv"
+            write_signals(signal_path)
+            write_features(feature_path)
+
+            report = evaluate_signal_file(
+                SignalEvaluationConfig(
+                    signal_path=signal_path,
+                    feature_path=feature_path,
+                    horizon_seconds=30,
+                    tick_size=0.25,
+                    cost_ticks=2.0,
+                    max_match_lag_seconds=1.5,
+                    run_gap_seconds=120.0,
+                )
+            )
+
+            self.assertEqual(report.source_signals, 4)
+            self.assertEqual(report.total_signals, 1)
+            self.assertEqual(report.candidates, 1)
+            self.assertEqual(report.evaluated_candidates, 0)
+            self.assertEqual(report.unmatched_candidates, 1)
+            self.assertIn("latest run", report.run_filter)
+            self.assertIn("Raw signals in file: 4", report.to_markdown())
 
 
 def write_signals(path: Path) -> None:

@@ -16,6 +16,7 @@ class RecordingConfig:
     live_features: bool = True
     feature_windows: str = "1,5,30,60"
     feature_interval_seconds: int = 1
+    bar_interval_seconds: int = 60
 
 
 def find_node_executable() -> str:
@@ -68,6 +69,7 @@ def run_realtime_recorder(config: RecordingConfig) -> int:
         command.append("--no-live-features")
     command.extend(["--feature-windows", config.feature_windows])
     command.extend(["--feature-interval-seconds", str(config.feature_interval_seconds)])
+    command.extend(["--bar-interval-seconds", str(config.bar_interval_seconds)])
 
     try:
         return subprocess.run(command, check=False).returncode

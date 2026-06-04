@@ -34,6 +34,13 @@ PROJECTX_LIVE=false
 
 # Local data lake root.
 AXIOM_DATA_DIR=data
+
+# Bar timeframe for historical backfill and live bar building.
+AXIOM_BAR_UNIT=minute
+AXIOM_BAR_UNIT_NUMBER=1
+
+# How far back to pull history on a fresh start (days).
+AXIOM_HISTORY_DAYS=365
 ```
 
 ## Main Run
@@ -41,13 +48,29 @@ AXIOM_DATA_DIR=data
 The main run (`python .\main.py`) uses these defaults:
 
 - Symbol: `MNQ`
-- Historical bars: 30-day resume window, one-minute bars
+- Bar timeframe: `AXIOM_BAR_UNIT`/`AXIOM_BAR_UNIT_NUMBER` (default 1-minute)
+- Historical bars: pulls up to `AXIOM_HISTORY_DAYS` (default 365) on a fresh start, then resumes from the last download
 - Live streams: quotes, trades, market depth
 - Feature windows: 1s, 5s, 30s, 60s
 - Forward labels: 5s, 15s, 30s, 60s
 - Tick size: 0.25
 
 The recorder keeps running until you press `Ctrl+C`.
+
+## Continuous Bars
+
+Historical bars come from the API. When a live recording session finalizes,
+Axiom also aggregates that session's recorded trades into OHLCV bars at the same
+timeframe and writes them alongside the API bars (`live_<date>.csv`) in the same
+contract/unit partition. Together they form one continuous bar series spanning
+history and the live session. API history bars stay authoritative wherever they
+overlap the live-built bars.
+
+During recording, the Node recorder also emits each bar in real time the instant
+its interval closes, to `live/projectx/bars/.../bars.jsonl` (interval =
+`AXIOM_BAR_UNIT`/`AXIOM_BAR_UNIT_NUMBER`). That live stream is what a future
+signal/execution engine will read to act on the just-closed bar; the bronze
+continuous series above is the canonical dataset for offline work.
 
 ## Data Layout
 
@@ -56,8 +79,10 @@ data/
   raw/projectx/history/       append-only historical API responses
   raw/projectx/realtime/      append-only live quote/trade/depth JSONL
   bronze/projectx/            normalized CSV tables
+  bronze/projectx/bars/       API + live-built OHLCV bars (continuous series)
   silver/projectx/features/   model/research-ready feature tables
   live/projectx/features/     rolling live feature snapshots
+  live/projectx/bars/         real-time OHLCV bars emitted as each interval closes
   state/history_state.json    historical backfill resume state
 ```
 

@@ -23,6 +23,14 @@ class BarUnit(IntEnum):
     MONTH = 6
 
 
+def bar_unit_from_name(name: str) -> BarUnit:
+    try:
+        return BarUnit[name.strip().upper()]
+    except KeyError as exc:
+        valid = ", ".join(unit.name.lower() for unit in BarUnit)
+        raise ValueError(f"Unknown bar unit {name!r}. Expected one of: {valid}.") from exc
+
+
 @dataclass(frozen=True)
 class Contract:
     id: str

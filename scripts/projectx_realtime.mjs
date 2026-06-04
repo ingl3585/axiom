@@ -27,6 +27,7 @@ function parseArgs(argv) {
     liveFeatures: true,
     featureWindows: "1,5,30,60",
     featureIntervalSeconds: 1,
+    barIntervalSeconds: 60,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -53,6 +54,9 @@ function parseArgs(argv) {
       i += 1;
     } else if (arg === "--feature-interval-seconds") {
       args.featureIntervalSeconds = Number(next);
+      i += 1;
+    } else if (arg === "--bar-interval-seconds") {
+      args.barIntervalSeconds = Number(next);
       i += 1;
     } else if (arg === "--help" || arg === "-h") {
       printHelp();
@@ -81,6 +85,7 @@ Options:
   --no-live-features             Disable rolling live feature snapshots
   --feature-windows 1,5,30,60    Rolling windows in seconds
   --feature-interval-seconds 1   Snapshot interval in seconds
+  --bar-interval-seconds 60      Live OHLCV bar interval in seconds
 `);
 }
 
@@ -158,6 +163,20 @@ function liveFeatureFile(dataDir, contractId) {
     `date=${date}`,
     `contract=${contract}`,
     "features.jsonl",
+  );
+}
+
+function liveBarFile(dataDir, contractId) {
+  const date = new Date().toISOString().slice(0, 10);
+  const contract = safePartitionValue(contractId);
+  return join(
+    dataDir,
+    "live",
+    "projectx",
+    "bars",
+    `date=${date}`,
+    `contract=${contract}`,
+    "bars.jsonl",
   );
 }
 
@@ -339,13 +358,72 @@ function windowReturn(quoteWindow, currentMid) {
   return currentMid / first - 1;
 }
 
+class BarAggregator {
+  // Builds clock-aligned OHLCV bars from the trade stream and writes each bar
+  // the instant its interval rolls over, so a live consumer sees the just-closed
+  // bar in real time. Mirrors the offline Python aggregation (bars.py).
+  constructor({ dataDir, contractId, intervalSeconds }) {
+    this.dataDir = dataDir;
+    this.contractId = contractId;
+    this.intervalMs = Math.max(1, intervalSeconds) * 1000;
+    this.currentBucket = null;
+    this.bar = null;
+  }
+
+  onTrade(eventMs, price, volume) {
+    if (!Number.isFinite(eventMs) || !Number.isFinite(price)) return;
+    const bucket = Math.floor(eventMs / this.intervalMs) * this.intervalMs;
+    const addedVolume = Number.isFinite(volume) ? volume : 0;
+
+    if (this.currentBucket === null) {
+      this.startBar(bucket, price, addedVolume);
+      return;
+    }
+    if (bucket < this.currentBucket) return; // late trade, keep bars monotonic
+    if (bucket > this.currentBucket) {
+      this.flush();
+      this.startBar(bucket, price, addedVolume);
+      return;
+    }
+    this.bar.h = Math.max(this.bar.h, price);
+    this.bar.l = Math.min(this.bar.l, price);
+    this.bar.c = price;
+    this.bar.v += addedVolume;
+  }
+
+  startBar(bucket, price, volume) {
+    this.currentBucket = bucket;
+    this.bar = { o: price, h: price, l: price, c: price, v: volume };
+  }
+
+  flush() {
+    if (this.bar === null || this.currentBucket === null) return;
+    const payload = {
+      t: new Date(this.currentBucket).toISOString(),
+      o: this.bar.o,
+      h: this.bar.h,
+      l: this.bar.l,
+      c: this.bar.c,
+      v: this.bar.v,
+    };
+    appendJsonl(liveBarFile(this.dataDir, this.contractId), payload);
+    console.log(
+      `${payload.t} bar o=${payload.o} h=${payload.h} l=${payload.l} ` +
+      `c=${payload.c} v=${payload.v}`,
+    );
+    this.bar = null;
+    this.currentBucket = null;
+  }
+}
+
 class ProjectXMarketRecorder {
-  constructor({ token, contractId, events, dataDir, featureEngine }) {
+  constructor({ token, contractId, events, dataDir, featureEngine, barAggregator }) {
     this.token = token;
     this.contractId = contractId;
     this.events = new Set(events);
     this.dataDir = dataDir;
     this.featureEngine = featureEngine;
+    this.barAggregator = barAggregator;
     this.invocationId = 1;
     this.counts = { GatewayQuote: 0, GatewayTrade: 0, GatewayDepth: 0 };
     this.startedAt = new Date().toISOString();
@@ -444,6 +522,13 @@ class ProjectXMarketRecorder {
     if (this.featureEngine) {
       this.featureEngine.onMarketEvent(target, observedAt, data);
     }
+    if (this.barAggregator && target === "GatewayTrade") {
+      const observedMs = Date.parse(observedAt);
+      for (const record of recordList(data)) {
+        const eventMs = parseTimestamp(record.timestamp) ?? observedMs;
+        this.barAggregator.onTrade(eventMs, Number(record.price), Number(record.volume || 0));
+      }
+    }
 
     if (target in this.counts) {
       this.counts[target] += 1;
@@ -455,6 +540,7 @@ class ProjectXMarketRecorder {
   }
 
   close() {
+    if (this.barAggregator) this.barAggregator.flush();
     if (this.ws) this.ws.close();
   }
 }
@@ -480,14 +566,26 @@ async function main() {
         intervalSeconds: args.featureIntervalSeconds,
       })
     : null;
+  const barAggregator = new BarAggregator({
+    dataDir: args.dataDir,
+    contractId: args.contractId,
+    intervalSeconds: args.barIntervalSeconds,
+  });
   const recorder = new ProjectXMarketRecorder({
     token,
     contractId: args.contractId,
     events,
     dataDir: args.dataDir,
     featureEngine,
+    barAggregator,
   });
   recorder.connect();
+
+  process.on("SIGINT", () => {
+    console.log("\nReceived interrupt, flushing final bar and closing.");
+    recorder.close();
+    process.exit(0);
+  });
 
   if (args.durationSeconds) {
     setTimeout(() => {

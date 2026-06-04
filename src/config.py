@@ -27,6 +27,16 @@ def env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value.strip())
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     projectx_username: str | None
@@ -35,6 +45,9 @@ class Settings:
     projectx_market_hub: str
     projectx_live: bool
     data_dir: Path
+    bar_unit: str
+    bar_unit_number: int
+    history_days: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -50,6 +63,9 @@ class Settings:
             ).rstrip("/"),
             projectx_live=env_bool("PROJECTX_LIVE", default=False),
             data_dir=Path(os.environ.get("AXIOM_DATA_DIR", "data")),
+            bar_unit=(os.environ.get("AXIOM_BAR_UNIT") or "minute").strip().lower(),
+            bar_unit_number=env_int("AXIOM_BAR_UNIT_NUMBER", 1),
+            history_days=env_int("AXIOM_HISTORY_DAYS", 365),
         )
 
     def require_projectx_credentials(self) -> tuple[str, str]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
+from bars import build_session_bars, date_contract_partitions, load_continuous_bars
 from config import Settings
 from features import IntradayFeatureConfig, build_intraday_features
 from history import HistoryBackfillResult, backfill_historical_bars
@@ -12,12 +13,13 @@ from projectx import (
     Contract,
     ProjectXClient,
     ProjectXError,
+    bar_unit_from_name,
     compact_utc,
+    unit_seconds,
 )
 from recording import RecordingConfig, run_realtime_recorder
 
 DEFAULT_SYMBOL = "MNQ"
-DEFAULT_HISTORY_DAYS = 30
 DEFAULT_TICK_SIZE = 0.25
 DEFAULT_WINDOWS = "1,5,30,60"
 DEFAULT_HORIZONS = "5,15,30,60"
@@ -40,9 +42,9 @@ def run_pipeline() -> int:
         settings=settings,
         client=client,
         symbol=DEFAULT_SYMBOL,
-        days=DEFAULT_HISTORY_DAYS,
-        unit=BarUnit.MINUTE,
-        unit_number=1,
+        days=settings.history_days,
+        unit=bar_unit_from_name(settings.bar_unit),
+        unit_number=settings.bar_unit_number,
         live=settings.projectx_live,
     )
     print_backfill_result(backfill_result)
@@ -146,6 +148,7 @@ def build_latest_features(settings: Settings) -> None:
 def record_live_data(settings: Settings, contract_id: str) -> int:
     print("Recording real-time Project X data. Press Ctrl+C to stop.")
     sys.stdout.flush()
+    bar_unit = bar_unit_from_name(settings.bar_unit)
     code = run_realtime_recorder(
         RecordingConfig(
             contract_id=contract_id,
@@ -154,6 +157,7 @@ def record_live_data(settings: Settings, contract_id: str) -> int:
             live_features=True,
             feature_windows=DEFAULT_WINDOWS,
             feature_interval_seconds=DEFAULT_INTERVAL_SECONDS,
+            bar_interval_seconds=unit_seconds(bar_unit, settings.bar_unit_number),
         )
     )
 
@@ -166,6 +170,8 @@ def record_live_data(settings: Settings, contract_id: str) -> int:
             interval_seconds=DEFAULT_INTERVAL_SECONDS,
             max_stale_quote_seconds=DEFAULT_MAX_STALE_QUOTE_SECONDS,
             tick_size=DEFAULT_TICK_SIZE,
+            bar_unit=bar_unit_from_name(settings.bar_unit),
+            bar_unit_number=settings.bar_unit_number,
         )
     except ValueError as exc:
         print(f"skipped recorded-data finalization: {exc}")
@@ -181,6 +187,8 @@ def finalize_realtime_capture(
     interval_seconds: int,
     max_stale_quote_seconds: int,
     tick_size: float,
+    bar_unit: BarUnit = BarUnit.MINUTE,
+    bar_unit_number: int = 1,
 ) -> None:
     directory = find_latest_realtime_dir(data_dir)
     if directory is None:
@@ -189,6 +197,8 @@ def finalize_realtime_capture(
     outputs = normalize_realtime_dir(directory, data_dir)
     append_manifest(data_dir, outputs)
     print_normalized_files(outputs)
+
+    build_session_bars_from_outputs(data_dir, outputs, bar_unit, bar_unit_number)
 
     quote_output = next((output for output in outputs if output.name == "quotes"), None)
     if quote_output is None:
@@ -206,6 +216,32 @@ def finalize_realtime_capture(
         )
     )
     print_feature_result(result)
+
+
+def build_session_bars_from_outputs(
+    data_dir: Path,
+    outputs: list[object],
+    bar_unit: BarUnit,
+    bar_unit_number: int,
+) -> None:
+    trade_output = next((output for output in outputs if output.name == "trades"), None)
+    if trade_output is None:
+        print("session bars: no trades captured, skipped.")
+        return
+
+    bars_result = build_session_bars(
+        data_dir,
+        trade_output.path,
+        unit=bar_unit,
+        unit_number=bar_unit_number,
+    )
+    print(f"session bars: {bars_result.bars:,} rows")
+    print(f"  source: {bars_result.source}")
+    print(f"  output: {bars_result.path}")
+
+    _, contract_part = date_contract_partitions(trade_output.path)
+    continuous = load_continuous_bars(data_dir, contract_part, bar_unit, bar_unit_number)
+    print(f"  continuous bars (history + live): {len(continuous):,}")
 
 
 def resolve_active_contract(

@@ -52,7 +52,7 @@ You can also run the project through `main.py`:
 
 By default, `main.py` runs Project X auth, backfills missing MNQ historical bars, normalizes the latest raw data, builds intraday feature rows, writes fresh QA reports, then starts recording live Project X market data. While recording, it also writes rolling live feature snapshots. It keeps running until you press `Ctrl+C`.
 
-When recording stops, Axiom prints and writes a session health report covering raw event counts, capture gaps, spread/volume stats, and live feature rows.
+When recording stops, Axiom normalizes the latest capture, rebuilds the silver intraday feature table, then prints and writes a session health report covering raw event counts, capture gaps, spread/volume stats, and live feature rows.
 
 For a short smoke test:
 
@@ -206,6 +206,14 @@ Before building any signal, check whether features actually carry predictive val
 ```
 
 Reports are written to `data/reports/research/` as Markdown and JSON. Forward windows overlap and are autocorrelated, so treat `|IC|` as a ranking signal for further investigation, not a significance test.
+
+Run baseline candidate-rule backtests against the latest silver feature table:
+
+```powershell
+.\.venv\Scripts\python.exe main.py research backtest
+```
+
+This is a research harness, not an execution simulator. It scores deterministic baselines such as random long/short, momentum, mean reversion, order-flow follow/fade, and spread-filtered momentum after configurable tick costs. Reports are written to `data/reports/research/`.
 
 ## Data Layout
 

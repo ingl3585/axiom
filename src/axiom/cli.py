@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 import sys
 
+from .backtest import BacktestConfig, run_backtest
 from .config import Settings
 from .features import IntradayFeatureConfig, build_intraday_features
 from .history import HistoryBackfillResult, backfill_historical_bars
@@ -74,6 +75,7 @@ def build_parser() -> ArgumentParser:
     run_parser.add_argument("--record-events", default="quotes,trades,depth")
     run_parser.add_argument("--record-duration-seconds", type=int)
     run_parser.add_argument("--record-no-live-features", action="store_true")
+    run_parser.add_argument("--record-no-finalize", action="store_true")
     run_parser.add_argument("--record-no-session-summary", action="store_true")
     run_parser.add_argument("--record-feature-windows", default="1,5,30,60")
     run_parser.add_argument("--record-feature-interval-seconds", type=int, default=1)
@@ -179,9 +181,13 @@ def build_parser() -> ArgumentParser:
     record.add_argument("--events", default="quotes,trades,depth")
     record.add_argument("--duration-seconds", type=int)
     record.add_argument("--no-live-features", action="store_true")
+    record.add_argument("--no-finalize", action="store_true")
     record.add_argument("--no-session-summary", action="store_true")
     record.add_argument("--feature-windows", default="1,5,30,60")
+    record.add_argument("--feature-horizons", default="5,15,30,60")
     record.add_argument("--feature-interval-seconds", type=int, default=1)
+    record.add_argument("--max-stale-quote-seconds", type=int, default=5)
+    record.add_argument("--tick-size", type=float, default=0.25)
     record.add_argument("--session-gap-threshold-seconds", type=float, default=10.0)
     record.add_argument("--session-stale-quote-seconds", type=float, default=5.0)
     record.set_defaults(handler=cmd_record)
@@ -227,6 +233,22 @@ def build_parser() -> ArgumentParser:
     ic.add_argument("--json", action="store_true", help="Print JSON instead of Markdown")
     ic.add_argument("--no-write", action="store_true", help="Do not write report files")
     ic.set_defaults(handler=cmd_research_ic)
+
+    backtest = research_subparsers.add_parser(
+        "backtest", help="Run baseline signal backtests against silver features"
+    )
+    backtest.add_argument("--path", help="Specific silver features CSV path")
+    backtest.add_argument("--horizon-seconds", type=int, default=30)
+    backtest.add_argument("--signal-window-seconds", type=int, default=5)
+    backtest.add_argument("--tick-size", type=float, default=0.25)
+    backtest.add_argument("--cost-ticks", type=float, default=2.0)
+    backtest.add_argument("--cooldown-seconds", type=int, default=0)
+    backtest.add_argument("--imbalance-threshold", type=float, default=0.20)
+    backtest.add_argument("--min-return-ticks", type=float, default=0.0)
+    backtest.add_argument("--max-spread-ticks", type=float, default=4.0)
+    backtest.add_argument("--json", action="store_true", help="Print JSON instead of Markdown")
+    backtest.add_argument("--no-write", action="store_true", help="Do not write report files")
+    backtest.set_defaults(handler=cmd_research_backtest)
 
     return parser
 
@@ -327,9 +349,13 @@ def cmd_run(args: Namespace) -> int:
                 events=args.record_events,
                 duration_seconds=args.record_duration_seconds,
                 no_live_features=args.record_no_live_features,
+                no_finalize=args.record_no_finalize,
                 no_session_summary=args.record_no_session_summary,
                 feature_windows=args.record_feature_windows,
+                feature_horizons=args.feature_horizons,
                 feature_interval_seconds=args.record_feature_interval_seconds,
+                max_stale_quote_seconds=args.feature_max_stale_quote_seconds,
+                tick_size=args.tick_size,
                 session_gap_threshold_seconds=args.session_gap_threshold_seconds,
                 session_stale_quote_seconds=args.session_stale_quote_seconds,
             )
@@ -678,6 +704,20 @@ def cmd_record(args: Namespace) -> int:
             feature_interval_seconds=args.feature_interval_seconds,
         )
     )
+    if not args.no_finalize:
+        print_section("Finalize Recorded Data")
+        try:
+            finalize_realtime_capture(
+                data_dir=settings.data_dir,
+                windows=args.feature_windows,
+                horizons=args.feature_horizons,
+                interval_seconds=args.feature_interval_seconds,
+                max_stale_quote_seconds=args.max_stale_quote_seconds,
+                tick_size=args.tick_size,
+            )
+        except ValueError as exc:
+            print(f"skipped recorded-data finalization: {exc}")
+
     if not args.no_session_summary:
         print_section("Session Health")
         try:
@@ -693,6 +733,47 @@ def cmd_record(args: Namespace) -> int:
         except ValueError as exc:
             print(f"skipped session health: {exc}")
     return code
+
+
+def finalize_realtime_capture(
+    *,
+    data_dir: Path,
+    windows: str,
+    horizons: str,
+    interval_seconds: int,
+    max_stale_quote_seconds: int,
+    tick_size: float,
+) -> None:
+    directory = find_latest_realtime_dir(data_dir)
+    if directory is None:
+        raise ValueError("No real-time capture directory found.")
+
+    outputs = normalize_realtime_dir(directory, data_dir)
+    append_manifest(data_dir, outputs)
+    print_normalized_files(outputs)
+
+    quote_output = next((output for output in outputs if output.name == "quotes"), None)
+    if quote_output is None:
+        raise ValueError("No normalized quote file found for latest capture.")
+
+    result = build_intraday_features(
+        IntradayFeatureConfig(
+            data_dir=data_dir,
+            quote_path=quote_output.path,
+            windows_seconds=parse_int_list(windows),
+            horizons_seconds=parse_int_list(horizons),
+            interval_seconds=interval_seconds,
+            max_stale_quote_seconds=max_stale_quote_seconds,
+            tick_size=tick_size,
+        )
+    )
+    print(f"intraday features: {result.rows:,} rows")
+    print(f"  quotes: {result.quote_path}")
+    if result.trade_path:
+        print(f"  trades: {result.trade_path}")
+    if result.depth_path:
+        print(f"  depth: {result.depth_path}")
+    print(f"  output: {result.path}")
 
 
 def cmd_features_intraday(args: Namespace) -> int:
@@ -740,6 +821,46 @@ def cmd_research_ic(args: Namespace) -> int:
             settings.data_dir / "reports" / "research",
             stem,
             report.to_markdown(top=args.top),
+            report.to_dict(),
+        )
+        print(f"Saved reports: {md_path}, {json_path}")
+    return 0
+
+
+def cmd_research_backtest(args: Namespace) -> int:
+    settings = Settings.from_env()
+    path = Path(args.path) if args.path else find_latest_file(
+        settings.data_dir / "silver" / "projectx" / "features", "*.csv"
+    )
+    if path is None:
+        raise ValueError(
+            "No silver features CSV found. Run `axiom features intraday` or pass --path."
+        )
+
+    report = run_backtest(
+        BacktestConfig(
+            path=path,
+            horizon_seconds=args.horizon_seconds,
+            signal_window_seconds=args.signal_window_seconds,
+            tick_size=args.tick_size,
+            cost_ticks=args.cost_ticks,
+            cooldown_seconds=args.cooldown_seconds,
+            imbalance_threshold=args.imbalance_threshold,
+            min_return_ticks=args.min_return_ticks,
+            max_spread_ticks=args.max_spread_ticks,
+        )
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.to_markdown())
+
+    if not args.no_write:
+        stem = f"backtest_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+        md_path, json_path = write_report_pair(
+            settings.data_dir / "reports" / "research",
+            stem,
+            report.to_markdown(),
             report.to_dict(),
         )
         print(f"Saved reports: {md_path}, {json_path}")

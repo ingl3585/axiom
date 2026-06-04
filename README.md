@@ -30,11 +30,20 @@ If `python` is not on PATH, use the bundled Codex runtime once to create the ven
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and fill in:
+Create `.env` and fill in:
 
 ```text
-PROJECTX_USERNAME=...
-PROJECTX_API_KEY=...
+PROJECTX_USERNAME=<username>
+PROJECTX_API_KEY=<api_key>
+
+PROJECTX_BASE_URL=https://api.topstepx.com
+PROJECTX_MARKET_HUB=https://rtc.topstepx.com/hubs/market
+
+# false = sim data subscription, true = live data subscription.
+PROJECTX_LIVE=false
+
+# Local data lake root.
+AXIOM_DATA_DIR=data
 ```
 
 ## Main Run

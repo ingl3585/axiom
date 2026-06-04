@@ -127,6 +127,32 @@ a stationary counterpart: `dist_vwap`/`vwap_sigma`, `dist_ema_9`/`dist_ema_21`,
 (identifiers and raw levels excluded); the raw levels remain in the table for
 reference and plotting.
 
+## Market State Profiles
+
+After bar features are built, Axiom also classifies every completed bar into a
+market state. The state combines:
+
+- session context (`open_hour`, `midday`, `close_hour`, `overnight`)
+- trend direction (`trend_up`, `trend_down`, `flat`, `mixed_trend`)
+- volatility and activity regime
+- VWAP location
+- opening-range structure
+- order-flow pressure when live aggressor data is available
+- RSI condition
+
+It then measures forward behavior over the next 5 bars: average forward ticks,
+win rate, max favorable excursion, and max adverse excursion. This is a research
+map, not a trade signal. The point is to see which states are worth turning into
+real setup logic later.
+
+Outputs land next to the bar feature table:
+
+```text
+silver/projectx/states/bars/<contract>/<unit>/states.csv
+silver/projectx/states/bars/<contract>/<unit>/summary.md
+silver/projectx/states/bars/<contract>/<unit>/summary.json
+```
+
 ## Data Layout
 
 ```text
@@ -137,6 +163,7 @@ data/
   bronze/projectx/bars/       API + live-built OHLCV bars (continuous series)
   silver/projectx/features/   model/research-ready feature tables
   silver/projectx/features/bars/  bar-based indicator tables
+  silver/projectx/states/bars/    market-state profiles and summaries
   live/projectx/features/     rolling live feature snapshots
   live/projectx/bars/         real-time OHLCV bars emitted as each interval closes
   state/history_state.json    historical backfill resume state

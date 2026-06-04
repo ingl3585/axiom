@@ -368,11 +368,14 @@ class BarAggregator {
     this.intervalMs = Math.max(1, intervalSeconds) * 1000;
     this.currentBucket = null;
     this.bar = null;
+    this.flushTimer = null;
+    this.lastFlushedBucket = null;
   }
 
   onTrade(eventMs, price, volume, tradeType) {
     if (!Number.isFinite(eventMs) || !Number.isFinite(price)) return;
     const bucket = Math.floor(eventMs / this.intervalMs) * this.intervalMs;
+    if (this.lastFlushedBucket !== null && bucket <= this.lastFlushedBucket) return;
     const addedVolume = Number.isFinite(volume) ? volume : 0;
     const buyVolume = tradeType === 0 ? addedVolume : 0;
     const sellVolume = tradeType === 1 ? addedVolume : 0;
@@ -398,10 +401,37 @@ class BarAggregator {
   startBar(bucket, price, volume, buyVolume, sellVolume) {
     this.currentBucket = bucket;
     this.bar = { o: price, h: price, l: price, c: price, v: volume, bv: buyVolume, sv: sellVolume };
+    this.scheduleFlush();
+  }
+
+  scheduleFlush() {
+    this.clearFlushTimer();
+    if (this.currentBucket === null) return;
+    const closeAt = this.currentBucket + this.intervalMs;
+    const delayMs = Math.max(0, closeAt - Date.now());
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      this.flushClosed(Date.now());
+    }, delayMs);
+  }
+
+  clearFlushTimer() {
+    if (this.flushTimer !== null) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+  }
+
+  flushClosed(nowMs = Date.now()) {
+    if (this.currentBucket === null) return;
+    if (nowMs >= this.currentBucket + this.intervalMs) {
+      this.flush();
+    }
   }
 
   flush() {
     if (this.bar === null || this.currentBucket === null) return;
+    this.clearFlushTimer();
     const payload = {
       t: new Date(this.currentBucket).toISOString(),
       o: this.bar.o,
@@ -417,8 +447,14 @@ class BarAggregator {
       `${payload.t} bar o=${payload.o} h=${payload.h} l=${payload.l} ` +
       `c=${payload.c} v=${payload.v} delta=${payload.bv - payload.sv}`,
     );
+    this.lastFlushedBucket = this.currentBucket;
     this.bar = null;
     this.currentBucket = null;
+  }
+
+  close() {
+    this.flushClosed(Date.now());
+    this.clearFlushTimer();
   }
 }
 
@@ -551,7 +587,7 @@ class ProjectXMarketRecorder {
   }
 
   close() {
-    if (this.barAggregator) this.barAggregator.flush();
+    if (this.barAggregator) this.barAggregator.close();
     if (this.ws) this.ws.close();
   }
 }
@@ -593,7 +629,7 @@ async function main() {
   recorder.connect();
 
   process.on("SIGINT", () => {
-    console.log("\nReceived interrupt, flushing final bar and closing.");
+    console.log("\nReceived interrupt, closing.");
     recorder.close();
     process.exit(0);
   });

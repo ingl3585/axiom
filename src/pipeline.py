@@ -19,6 +19,7 @@ from projectx import (
     unit_seconds,
 )
 from recording import RecordingConfig, run_realtime_recorder
+from state_profile import StateProfileConfig, build_state_profile
 
 DEFAULT_SYMBOL = "MNQ"
 DEFAULT_TICK_SIZE = 0.25
@@ -150,12 +151,27 @@ def build_latest_features(settings: Settings) -> None:
 
 
 def build_bar_feature_table(settings: Settings, contract_id: str) -> None:
+    build_bar_features_for_partition(
+        data_dir=settings.data_dir,
+        contract_part=contract_part_from_id(contract_id),
+        bar_unit=bar_unit_from_name(settings.bar_unit),
+        bar_unit_number=settings.bar_unit_number,
+    )
+
+
+def build_bar_features_for_partition(
+    *,
+    data_dir: Path,
+    contract_part: str,
+    bar_unit: BarUnit,
+    bar_unit_number: int,
+) -> None:
     result = build_bar_features(
         BarFeatureConfig(
-            data_dir=settings.data_dir,
-            contract_part=contract_part_from_id(contract_id),
-            unit=bar_unit_from_name(settings.bar_unit),
-            unit_number=settings.bar_unit_number,
+            data_dir=data_dir,
+            contract_part=contract_part,
+            unit=bar_unit,
+            unit_number=bar_unit_number,
         )
     )
     if result.bars == 0:
@@ -163,6 +179,21 @@ def build_bar_feature_table(settings: Settings, contract_id: str) -> None:
         return
     print(f"bar features: {result.rows:,} rows from {result.bars:,} bars")
     print(f"  output: {result.path}")
+
+    profile = build_state_profile(
+        StateProfileConfig(
+            data_dir=data_dir,
+            feature_path=result.path,
+            horizon_bars=5,
+            tick_size=DEFAULT_TICK_SIZE,
+        )
+    )
+    print(
+        f"state profile: {profile.labeled_rows:,} labeled rows "
+        f"across {profile.states:,} states"
+    )
+    print(f"  states: {profile.rows_path}")
+    print(f"  summary: {profile.markdown_path}")
 
 
 def record_live_data(settings: Settings, contract_id: str) -> int:
@@ -262,6 +293,13 @@ def build_session_bars_from_outputs(
     _, contract_part = date_contract_partitions(trade_output.path)
     continuous = load_continuous_bars(data_dir, contract_part, bar_unit, bar_unit_number)
     print(f"  continuous bars (history + live): {len(continuous):,}")
+
+    build_bar_features_for_partition(
+        data_dir=data_dir,
+        contract_part=contract_part,
+        bar_unit=bar_unit,
+        bar_unit_number=bar_unit_number,
+    )
 
 
 def resolve_active_contract(

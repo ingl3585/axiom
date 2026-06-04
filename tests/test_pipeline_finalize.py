@@ -98,13 +98,38 @@ class PipelineFinalizeTests(unittest.TestCase):
                 / "contract=CON_F_US_MNQ_M26"
                 / "features_1s.csv"
             )
+            bar_feature_path = (
+                data_dir
+                / "silver"
+                / "projectx"
+                / "features"
+                / "bars"
+                / "contract=CON_F_US_MNQ_M26"
+                / "unit=minute_1"
+                / "features.csv"
+            )
+            state_path = (
+                data_dir
+                / "silver"
+                / "projectx"
+                / "states"
+                / "bars"
+                / "contract=CON_F_US_MNQ_M26"
+                / "unit=minute_1"
+                / "states.csv"
+            )
 
             self.assertTrue(quote_path.exists())
             self.assertTrue(feature_path.exists())
+            self.assertTrue(bar_feature_path.exists())
+            self.assertTrue(state_path.exists())
             with feature_path.open(encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 3)
             self.assertEqual(rows[0]["forward_mfe_ticks_1s"], "2.0")
+            with bar_feature_path.open(encoding="utf-8") as handle:
+                bar_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(bar_rows), 1)
 
 
 if __name__ == "__main__":

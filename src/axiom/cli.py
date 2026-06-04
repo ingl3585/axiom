@@ -75,10 +75,16 @@ def build_parser() -> ArgumentParser:
     run_parser.add_argument("--record-events", default="quotes,trades,depth")
     run_parser.add_argument("--record-duration-seconds", type=int)
     run_parser.add_argument("--record-no-live-features", action="store_true")
+    run_parser.add_argument("--record-no-live-signals", action="store_true")
     run_parser.add_argument("--record-no-finalize", action="store_true")
     run_parser.add_argument("--record-no-session-summary", action="store_true")
     run_parser.add_argument("--record-feature-windows", default="1,5,30,60")
     run_parser.add_argument("--record-feature-interval-seconds", type=int, default=1)
+    run_parser.add_argument("--signal-window-seconds", type=int, default=5)
+    run_parser.add_argument("--signal-cooldown-seconds", type=int, default=30)
+    run_parser.add_argument("--signal-min-momentum-ticks", type=float, default=0.0)
+    run_parser.add_argument("--signal-max-spread-ticks", type=float, default=4.0)
+    run_parser.add_argument("--signal-max-stale-quote-seconds", type=float, default=5.0)
     run_parser.add_argument("--session-gap-threshold-seconds", type=float, default=10.0)
     run_parser.add_argument("--session-stale-quote-seconds", type=float, default=5.0)
     run_parser.set_defaults(handler=cmd_run)
@@ -181,6 +187,7 @@ def build_parser() -> ArgumentParser:
     record.add_argument("--events", default="quotes,trades,depth")
     record.add_argument("--duration-seconds", type=int)
     record.add_argument("--no-live-features", action="store_true")
+    record.add_argument("--no-live-signals", action="store_true")
     record.add_argument("--no-finalize", action="store_true")
     record.add_argument("--no-session-summary", action="store_true")
     record.add_argument("--feature-windows", default="1,5,30,60")
@@ -188,6 +195,11 @@ def build_parser() -> ArgumentParser:
     record.add_argument("--feature-interval-seconds", type=int, default=1)
     record.add_argument("--max-stale-quote-seconds", type=int, default=5)
     record.add_argument("--tick-size", type=float, default=0.25)
+    record.add_argument("--signal-window-seconds", type=int, default=5)
+    record.add_argument("--signal-cooldown-seconds", type=int, default=30)
+    record.add_argument("--signal-min-momentum-ticks", type=float, default=0.0)
+    record.add_argument("--signal-max-spread-ticks", type=float, default=4.0)
+    record.add_argument("--signal-max-stale-quote-seconds", type=float, default=5.0)
     record.add_argument("--session-gap-threshold-seconds", type=float, default=10.0)
     record.add_argument("--session-stale-quote-seconds", type=float, default=5.0)
     record.set_defaults(handler=cmd_record)
@@ -349,6 +361,7 @@ def cmd_run(args: Namespace) -> int:
                 events=args.record_events,
                 duration_seconds=args.record_duration_seconds,
                 no_live_features=args.record_no_live_features,
+                no_live_signals=args.record_no_live_signals,
                 no_finalize=args.record_no_finalize,
                 no_session_summary=args.record_no_session_summary,
                 feature_windows=args.record_feature_windows,
@@ -356,6 +369,11 @@ def cmd_run(args: Namespace) -> int:
                 feature_interval_seconds=args.record_feature_interval_seconds,
                 max_stale_quote_seconds=args.feature_max_stale_quote_seconds,
                 tick_size=args.tick_size,
+                signal_window_seconds=args.signal_window_seconds,
+                signal_cooldown_seconds=args.signal_cooldown_seconds,
+                signal_min_momentum_ticks=args.signal_min_momentum_ticks,
+                signal_max_spread_ticks=args.signal_max_spread_ticks,
+                signal_max_stale_quote_seconds=args.signal_max_stale_quote_seconds,
                 session_gap_threshold_seconds=args.session_gap_threshold_seconds,
                 session_stale_quote_seconds=args.session_stale_quote_seconds,
             )
@@ -700,8 +718,15 @@ def cmd_record(args: Namespace) -> int:
             data_dir=settings.data_dir,
             duration_seconds=args.duration_seconds,
             live_features=not args.no_live_features,
+            live_signals=not args.no_live_signals,
             feature_windows=args.feature_windows,
             feature_interval_seconds=args.feature_interval_seconds,
+            signal_window_seconds=args.signal_window_seconds,
+            signal_cooldown_seconds=args.signal_cooldown_seconds,
+            signal_min_momentum_ticks=args.signal_min_momentum_ticks,
+            signal_max_spread_ticks=args.signal_max_spread_ticks,
+            signal_max_stale_quote_seconds=args.signal_max_stale_quote_seconds,
+            signal_tick_size=args.tick_size,
         )
     )
     if not args.no_finalize:

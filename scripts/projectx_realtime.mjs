@@ -25,8 +25,15 @@ function parseArgs(argv) {
     dataDir: process.env.AXIOM_DATA_DIR || "data",
     durationSeconds: null,
     liveFeatures: true,
+    liveSignals: true,
     featureWindows: "1,5,30,60",
     featureIntervalSeconds: 1,
+    signalWindowSeconds: 5,
+    signalCooldownSeconds: 30,
+    signalMinMomentumTicks: 0,
+    signalMaxSpreadTicks: 4,
+    signalMaxStaleQuoteSeconds: 5,
+    signalTickSize: 0.25,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -48,11 +55,33 @@ function parseArgs(argv) {
       args.liveFeatures = true;
     } else if (arg === "--no-live-features") {
       args.liveFeatures = false;
+    } else if (arg === "--live-signals") {
+      args.liveSignals = true;
+    } else if (arg === "--no-live-signals") {
+      args.liveSignals = false;
     } else if (arg === "--feature-windows") {
       args.featureWindows = next;
       i += 1;
     } else if (arg === "--feature-interval-seconds") {
       args.featureIntervalSeconds = Number(next);
+      i += 1;
+    } else if (arg === "--signal-window-seconds") {
+      args.signalWindowSeconds = Number(next);
+      i += 1;
+    } else if (arg === "--signal-cooldown-seconds") {
+      args.signalCooldownSeconds = Number(next);
+      i += 1;
+    } else if (arg === "--signal-min-momentum-ticks") {
+      args.signalMinMomentumTicks = Number(next);
+      i += 1;
+    } else if (arg === "--signal-max-spread-ticks") {
+      args.signalMaxSpreadTicks = Number(next);
+      i += 1;
+    } else if (arg === "--signal-max-stale-quote-seconds") {
+      args.signalMaxStaleQuoteSeconds = Number(next);
+      i += 1;
+    } else if (arg === "--signal-tick-size") {
+      args.signalTickSize = Number(next);
       i += 1;
     } else if (arg === "--help" || arg === "-h") {
       printHelp();
@@ -79,8 +108,13 @@ Options:
   --data-dir data                Local data root
   --duration-seconds 30          Stop after N seconds
   --no-live-features             Disable rolling live feature snapshots
+  --no-live-signals              Disable candidate signal logs
   --feature-windows 1,5,30,60    Rolling windows in seconds
   --feature-interval-seconds 1   Snapshot interval in seconds
+  --signal-window-seconds 5      Momentum signal window
+  --signal-cooldown-seconds 30   Minimum seconds between candidate signals
+  --signal-min-momentum-ticks 0  Minimum absolute momentum in ticks
+  --signal-max-spread-ticks 4    Maximum spread in ticks
 `);
 }
 
@@ -161,6 +195,20 @@ function liveFeatureFile(dataDir, contractId) {
   );
 }
 
+function liveSignalFile(dataDir, contractId) {
+  const date = new Date().toISOString().slice(0, 10);
+  const contract = safePartitionValue(contractId);
+  return join(
+    dataDir,
+    "live",
+    "projectx",
+    "signals",
+    `date=${date}`,
+    `contract=${contract}`,
+    "signals.jsonl",
+  );
+}
+
 function appendJsonl(path, payload) {
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, `${JSON.stringify(payload)}\n`, "utf8");
@@ -184,7 +232,7 @@ function signalRFrame(message) {
 }
 
 class LiveFeatureEngine {
-  constructor({ dataDir, contractId, windowsSeconds, intervalSeconds }) {
+  constructor({ dataDir, contractId, windowsSeconds, intervalSeconds, signalEngine }) {
     this.dataDir = dataDir;
     this.contractId = contractId;
     this.windowsSeconds = windowsSeconds;
@@ -195,6 +243,7 @@ class LiveFeatureEngine {
     this.depthEvents = [];
     this.lastQuote = null;
     this.lastSnapshotAt = 0;
+    this.signalEngine = signalEngine;
   }
 
   onMarketEvent(target, observedAt, data) {
@@ -262,6 +311,9 @@ class LiveFeatureEngine {
     this.lastSnapshotAt = bucket;
     const snapshot = this.snapshot(nowMs, bucket);
     appendJsonl(liveFeatureFile(this.dataDir, this.contractId), snapshot);
+    if (this.signalEngine) {
+      this.signalEngine.onSnapshot(snapshot, nowMs);
+    }
     if (snapshot.sequence % 30 === 0) {
       console.log(
         `${snapshot.timestamp} live mid=${snapshot.midPrice} spread=${snapshot.spread} ` +
@@ -315,6 +367,126 @@ class LiveFeatureEngine {
   }
 }
 
+class MomentumSignalEngine {
+  constructor({
+    dataDir,
+    contractId,
+    windowSeconds,
+    cooldownSeconds,
+    minMomentumTicks,
+    maxSpreadTicks,
+    maxStaleQuoteSeconds,
+    tickSize,
+  }) {
+    this.dataDir = dataDir;
+    this.contractId = contractId;
+    this.windowSeconds = windowSeconds;
+    this.cooldownMs = cooldownSeconds * 1000;
+    this.minMomentumTicks = minMomentumTicks;
+    this.maxSpreadTicks = maxSpreadTicks;
+    this.maxStaleQuoteSeconds = maxStaleQuoteSeconds;
+    this.tickSize = tickSize;
+    this.lastSignalMs = null;
+  }
+
+  policyName() {
+    return `momentum_${this.windowSeconds}s`;
+  }
+
+  onSnapshot(snapshot, nowMs) {
+    const decision = this.evaluate(snapshot, nowMs);
+    appendJsonl(liveSignalFile(this.dataDir, this.contractId), decision);
+    if (decision.direction !== 0) {
+      console.log(
+        `${decision.timestamp} signal ${decision.action} ` +
+        `momentum=${formatMaybe(decision.momentumTicks)}t ` +
+        `spread=${formatMaybe(decision.spreadTicks)}t`,
+      );
+      this.lastSignalMs = nowMs;
+    }
+  }
+
+  evaluate(snapshot, nowMs) {
+    const midPrice = finiteNumber(snapshot.midPrice);
+    const returnValue = finiteNumber(snapshot[`return_${this.windowSeconds}s`]);
+    const spread = finiteNumber(snapshot.spread);
+    const secondsSinceQuote = finiteNumber(snapshot.secondsSinceQuote);
+    const momentumTicks = (
+      returnValue != null && midPrice != null && this.tickSize > 0
+        ? returnValue * midPrice / this.tickSize
+        : null
+    );
+    const spreadTicks = (
+      spread != null && this.tickSize > 0
+        ? spread / this.tickSize
+        : null
+    );
+
+    let action = "NO_TRADE";
+    let direction = 0;
+    let reason = "momentum";
+    let cooldownRemainingSeconds = 0;
+
+    const blockReason = this.blockReason({
+      momentumTicks,
+      spreadTicks,
+      secondsSinceQuote,
+    });
+    if (blockReason) {
+      reason = blockReason;
+    } else {
+      cooldownRemainingSeconds = this.cooldownRemainingSeconds(nowMs);
+      if (cooldownRemainingSeconds > 0) {
+        reason = "cooldown";
+      } else if (momentumTicks > 0) {
+        action = "LONG_CANDIDATE";
+        direction = 1;
+      } else {
+        action = "SHORT_CANDIDATE";
+        direction = -1;
+      }
+    }
+
+    return {
+      timestamp: snapshot.timestamp,
+      contractId: this.contractId,
+      sequence: snapshot.sequence,
+      policy: this.policyName(),
+      action,
+      direction,
+      reason,
+      midPrice: snapshot.midPrice,
+      spread: snapshot.spread,
+      spreadTicks,
+      secondsSinceQuote: snapshot.secondsSinceQuote,
+      momentumTicks,
+      cooldownRemainingSeconds,
+      thresholds: {
+        minMomentumTicks: this.minMomentumTicks,
+        maxSpreadTicks: this.maxSpreadTicks,
+        maxStaleQuoteSeconds: this.maxStaleQuoteSeconds,
+        cooldownSeconds: this.cooldownMs / 1000,
+        tickSize: this.tickSize,
+      },
+    };
+  }
+
+  blockReason({ momentumTicks, spreadTicks, secondsSinceQuote }) {
+    if (momentumTicks == null) return "missing_momentum";
+    if (Math.abs(momentumTicks) <= this.minMomentumTicks) return "momentum_threshold";
+    if (spreadTicks == null) return "missing_spread";
+    if (spreadTicks > this.maxSpreadTicks) return "spread_filter";
+    if (!Number.isFinite(secondsSinceQuote)) return "missing_quote_age";
+    if (secondsSinceQuote > this.maxStaleQuoteSeconds) return "stale_quote";
+    return null;
+  }
+
+  cooldownRemainingSeconds(nowMs) {
+    if (!this.lastSignalMs || this.cooldownMs <= 0) return 0;
+    return Math.max((this.cooldownMs - (nowMs - this.lastSignalMs)) / 1000, 0);
+  }
+}
+
 function sum(values, selector) {
   return values.reduce((total, value) => total + selector(value), 0);
 }
@@ -337,6 +509,16 @@ function windowReturn(quoteWindow, currentMid) {
   const first = quoteWindow[0].mid;
   if (!first || !currentMid) return null;
   return currentMid / first - 1;
+}
+
+function formatMaybe(value) {
+  return Number.isFinite(value) ? value.toFixed(2) : "";
+}
+
+function finiteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 class ProjectXMarketRecorder {
@@ -472,12 +654,28 @@ async function main() {
     .split(",")
     .map((value) => Number(value.trim()))
     .filter((value) => Number.isFinite(value) && value > 0);
+  if (args.liveSignals && !featureWindows.includes(args.signalWindowSeconds)) {
+    featureWindows.push(args.signalWindowSeconds);
+  }
+  const signalEngine = args.liveSignals
+    ? new MomentumSignalEngine({
+        dataDir: args.dataDir,
+        contractId: args.contractId,
+        windowSeconds: args.signalWindowSeconds,
+        cooldownSeconds: args.signalCooldownSeconds,
+        minMomentumTicks: args.signalMinMomentumTicks,
+        maxSpreadTicks: args.signalMaxSpreadTicks,
+        maxStaleQuoteSeconds: args.signalMaxStaleQuoteSeconds,
+        tickSize: args.signalTickSize,
+      })
+    : null;
   const featureEngine = args.liveFeatures
     ? new LiveFeatureEngine({
         dataDir: args.dataDir,
         contractId: args.contractId,
         windowsSeconds: featureWindows.length ? featureWindows : [1, 5, 30, 60],
         intervalSeconds: args.featureIntervalSeconds,
+        signalEngine,
       })
     : null;
   const recorder = new ProjectXMarketRecorder({

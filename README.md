@@ -50,7 +50,7 @@ You can also run the project through `main.py`:
 .\.venv\Scripts\python.exe main.py
 ```
 
-By default, `main.py` runs Project X auth, backfills missing MNQ historical bars, normalizes the latest raw data, builds intraday feature rows, writes fresh QA reports, then starts recording live Project X market data. While recording, it also writes rolling live feature snapshots. It keeps running until you press `Ctrl+C`.
+By default, `main.py` runs Project X auth, backfills missing MNQ historical bars, normalizes the latest raw data, builds intraday feature rows, writes fresh QA reports, then starts recording live Project X market data. While recording, it also writes rolling live feature snapshots and candidate signal decisions. It keeps running until you press `Ctrl+C`.
 
 When recording stops, Axiom normalizes the latest capture, rebuilds the silver intraday feature table, then prints and writes a session health report covering raw event counts, capture gaps, spread/volume stats, and live feature rows.
 
@@ -195,7 +195,21 @@ The first feature table is written under `data/silver/projectx/features/intraday
 
 All labels reuse the same quote-staleness gate as the features, so they never read a stale or missing future quote.
 
-During live recording, rolling feature snapshots are written under `data/live/projectx/features/`. These are not trading signals yet; they are the live feature vectors that a future signal/risk/execution engine can consume.
+During live recording, rolling feature snapshots are written under `data/live/projectx/features/`. Candidate signal decisions are written under `data/live/projectx/signals/`. These are not orders and no executions are sent.
+
+The first live signal policy is `momentum_5s`: it emits `LONG_CANDIDATE`, `SHORT_CANDIDATE`, or `NO_TRADE` from live feature snapshots with spread, stale-quote, cooldown, and momentum-threshold gates. Defaults are deliberately paper/log only:
+
+```powershell
+.\.venv\Scripts\python.exe main.py record --duration-seconds 60
+```
+
+Useful controls:
+
+```powershell
+.\.venv\Scripts\python.exe main.py record --signal-cooldown-seconds 60
+.\.venv\Scripts\python.exe main.py record --signal-min-momentum-ticks 1
+.\.venv\Scripts\python.exe main.py record --no-live-signals
+```
 
 ## Feature Research
 
@@ -262,6 +276,10 @@ data/
         date=2026-06-03/
           contract=CON_F_US_MNQ_U25/
             features.jsonl
+      signals/
+        date=2026-06-03/
+          contract=CON_F_US_MNQ_U25/
+            signals.jsonl
   state/
     history_state.json
   reports/

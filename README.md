@@ -45,11 +45,7 @@ AXIOM_DATA_DIR=data
 
 ## Main Run
 
-```powershell
-python .\main.py
-```
-
-The main run uses these defaults:
+The main run (`python .\main.py`) uses these defaults:
 
 - Symbol: `MNQ`
 - Historical bars: 30-day resume window, one-minute bars
@@ -72,7 +68,7 @@ data/
   state/history_state.json    historical backfill resume state
 ```
 
-Raw files are the audit trail. Bronze files are cleaned enough for analysis. Silver files are where strategy research should happen.
+Raw files are the audit trail. Bronze files are cleaned enough for analysis. Silver files are the model-ready feature tables.
 
 ## Current Scope
 

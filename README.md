@@ -50,7 +50,9 @@ You can also run the project through `main.py`:
 .\.venv\Scripts\python.exe main.py
 ```
 
-By default, `main.py` runs Project X auth, backfills missing MNQ historical bars, normalizes the latest raw data, builds intraday feature rows, writes fresh QA reports, then starts recording live Project X market data. While recording, it also writes rolling live feature snapshots. It keeps running until you press `Ctrl+C`.
+By default, `main.py` runs Project X auth, backfills missing MNQ historical bars, normalizes the latest raw data, builds intraday feature rows, writes fresh QA reports, then starts recording live Project X market data. While recording, it also writes rolling live feature snapshots and candidate signal decisions. It keeps running until you press `Ctrl+C`.
+
+When recording stops, Axiom normalizes the latest capture, rebuilds the silver intraday feature table, then prints and writes a session health report covering raw event counts, capture gaps, spread/volume stats, and live feature rows.
 
 For a short smoke test:
 
@@ -121,6 +123,16 @@ Or use the Windows wrapper:
 
 If `node` is not on PATH, use your installed Node executable or the Codex bundled runtime.
 
+## Session Health
+
+Summarize the latest real-time capture and matching live feature snapshots:
+
+```powershell
+.\.venv\Scripts\python.exe main.py session
+```
+
+Reports are written to `data/reports/session/` as Markdown and JSON. The normal `main.py` run also writes one automatically after the recorder exits.
+
 ## Data QA
 
 Run QA against the latest historical bars and real-time capture:
@@ -183,7 +195,21 @@ The first feature table is written under `data/silver/projectx/features/intraday
 
 All labels reuse the same quote-staleness gate as the features, so they never read a stale or missing future quote.
 
-During live recording, rolling feature snapshots are written under `data/live/projectx/features/`. These are not trading signals yet; they are the live feature vectors that a future signal/risk/execution engine can consume.
+During live recording, rolling feature snapshots are written under `data/live/projectx/features/`. Candidate signal decisions are written under `data/live/projectx/signals/`. These are not orders and no executions are sent.
+
+The first live signal policy is `momentum_5s`: it emits `LONG_CANDIDATE`, `SHORT_CANDIDATE`, or `NO_TRADE` from live feature snapshots with spread, stale-quote, cooldown, and momentum-threshold gates. Defaults are deliberately paper/log only:
+
+```powershell
+.\.venv\Scripts\python.exe main.py record --duration-seconds 60
+```
+
+Useful controls:
+
+```powershell
+.\.venv\Scripts\python.exe main.py record --signal-cooldown-seconds 60
+.\.venv\Scripts\python.exe main.py record --signal-min-momentum-ticks 1
+.\.venv\Scripts\python.exe main.py record --no-live-signals
+```
 
 ## Feature Research
 
@@ -194,6 +220,22 @@ Before building any signal, check whether features actually carry predictive val
 ```
 
 Reports are written to `data/reports/research/` as Markdown and JSON. Forward windows overlap and are autocorrelated, so treat `|IC|` as a ranking signal for further investigation, not a significance test.
+
+Run baseline candidate-rule backtests against the latest silver feature table:
+
+```powershell
+.\.venv\Scripts\python.exe main.py research backtest
+```
+
+This is a research harness, not an execution simulator. It scores deterministic baselines such as random long/short, momentum, mean reversion, order-flow follow/fade, and spread-filtered momentum after configurable tick costs. Reports are written to `data/reports/research/`.
+
+Evaluate logged live candidate signals against finalized feature labels:
+
+```powershell
+.\.venv\Scripts\python.exe main.py research signals
+```
+
+This grades `LONG_CANDIDATE` / `SHORT_CANDIDATE` rows from the latest run in `data/live/projectx/signals/` using the latest silver feature labels and reports candidate counts, NO_TRADE reasons, win rate, net ticks, MFE/MAE, and unmatched candidates. Same-day signal files can contain multiple stopped-and-started runs; pass `--all-runs` to evaluate the whole file instead.
 
 ## Data Layout
 
@@ -242,10 +284,16 @@ data/
         date=2026-06-03/
           contract=CON_F_US_MNQ_U25/
             features.jsonl
+      signals/
+        date=2026-06-03/
+          contract=CON_F_US_MNQ_U25/
+            signals.jsonl
   state/
     history_state.json
   reports/
     qa/
+    research/
+    session/
 ```
 
 Raw files are the audit trail. Bronze files are normalized enough for quick pandas/Polars/DuckDB analysis.

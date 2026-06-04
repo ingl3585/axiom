@@ -482,21 +482,33 @@ def analyze_realtime_dir(directory: Path) -> RealtimeQa:
     return RealtimeQa(directory=directory, events=events)
 
 
-def analyze_event_file(name: str, path: Path) -> EventQa:
+def analyze_event_file(
+    name: str,
+    path: Path,
+    observed_since: datetime | None = None,
+) -> EventQa:
     qa = EventQa(name=name, path=path)
     with path.open(encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
             if not line:
                 continue
-            qa.frames += 1
             try:
                 frame = json.loads(line)
             except json.JSONDecodeError:
-                qa.parse_errors += 1
+                if observed_since is None:
+                    qa.frames += 1
+                    qa.parse_errors += 1
                 continue
 
             observed_at = parse_dt(frame.get("observedAt"))
+            if (
+                observed_since is not None
+                and observed_at is not None
+                and observed_at < observed_since
+            ):
+                continue
+            qa.frames += 1
             update_dt_range(qa, "observed", observed_at)
             payload = frame.get("data")
             records = payload if isinstance(payload, list) else [payload]

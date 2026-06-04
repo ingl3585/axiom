@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 import sys
 
+from .backtest import BacktestConfig, run_backtest
 from .config import Settings
 from .features import IntradayFeatureConfig, build_intraday_features
 from .history import HistoryBackfillResult, backfill_historical_bars
@@ -35,6 +36,8 @@ from .qa import (
 )
 from .recording import RecordingConfig, run_realtime_recorder
 from .research import analyze_feature_ic
+from .signal_eval import SignalEvaluationConfig, evaluate_signal_file
+from .session import analyze_session
 from .storage import bars_csv_path, history_raw_path, write_bars_csv, write_json
 
 
@@ -73,8 +76,18 @@ def build_parser() -> ArgumentParser:
     run_parser.add_argument("--record-events", default="quotes,trades,depth")
     run_parser.add_argument("--record-duration-seconds", type=int)
     run_parser.add_argument("--record-no-live-features", action="store_true")
+    run_parser.add_argument("--record-no-live-signals", action="store_true")
+    run_parser.add_argument("--record-no-finalize", action="store_true")
+    run_parser.add_argument("--record-no-session-summary", action="store_true")
     run_parser.add_argument("--record-feature-windows", default="1,5,30,60")
     run_parser.add_argument("--record-feature-interval-seconds", type=int, default=1)
+    run_parser.add_argument("--signal-window-seconds", type=int, default=5)
+    run_parser.add_argument("--signal-cooldown-seconds", type=int, default=30)
+    run_parser.add_argument("--signal-min-momentum-ticks", type=float, default=0.0)
+    run_parser.add_argument("--signal-max-spread-ticks", type=float, default=4.0)
+    run_parser.add_argument("--signal-max-stale-quote-seconds", type=float, default=5.0)
+    run_parser.add_argument("--session-gap-threshold-seconds", type=float, default=10.0)
+    run_parser.add_argument("--session-stale-quote-seconds", type=float, default=5.0)
     run_parser.set_defaults(handler=cmd_run)
 
     auth_parser = subparsers.add_parser("auth", help="Authenticate with Project X")
@@ -175,9 +188,33 @@ def build_parser() -> ArgumentParser:
     record.add_argument("--events", default="quotes,trades,depth")
     record.add_argument("--duration-seconds", type=int)
     record.add_argument("--no-live-features", action="store_true")
+    record.add_argument("--no-live-signals", action="store_true")
+    record.add_argument("--no-finalize", action="store_true")
+    record.add_argument("--no-session-summary", action="store_true")
     record.add_argument("--feature-windows", default="1,5,30,60")
+    record.add_argument("--feature-horizons", default="5,15,30,60")
     record.add_argument("--feature-interval-seconds", type=int, default=1)
+    record.add_argument("--max-stale-quote-seconds", type=int, default=5)
+    record.add_argument("--tick-size", type=float, default=0.25)
+    record.add_argument("--signal-window-seconds", type=int, default=5)
+    record.add_argument("--signal-cooldown-seconds", type=int, default=30)
+    record.add_argument("--signal-min-momentum-ticks", type=float, default=0.0)
+    record.add_argument("--signal-max-spread-ticks", type=float, default=4.0)
+    record.add_argument("--signal-max-stale-quote-seconds", type=float, default=5.0)
+    record.add_argument("--session-gap-threshold-seconds", type=float, default=10.0)
+    record.add_argument("--session-stale-quote-seconds", type=float, default=5.0)
     record.set_defaults(handler=cmd_record)
+
+    session = subparsers.add_parser(
+        "session", help="Summarize the latest real-time capture session"
+    )
+    session.add_argument("--dir", help="Specific real-time capture directory")
+    session.add_argument("--since", help="UTC ISO timestamp to filter observed rows")
+    session.add_argument("--gap-threshold-seconds", type=float, default=10.0)
+    session.add_argument("--stale-quote-seconds", type=float, default=5.0)
+    session.add_argument("--json", action="store_true", help="Print JSON instead of Markdown")
+    session.add_argument("--no-write", action="store_true", help="Do not write report files")
+    session.set_defaults(handler=cmd_session)
 
     features = subparsers.add_parser("features", help="Build model-ready feature tables")
     feature_subparsers = features.add_subparsers(dest="features_command", required=True)
@@ -209,6 +246,46 @@ def build_parser() -> ArgumentParser:
     ic.add_argument("--json", action="store_true", help="Print JSON instead of Markdown")
     ic.add_argument("--no-write", action="store_true", help="Do not write report files")
     ic.set_defaults(handler=cmd_research_ic)
+
+    backtest = research_subparsers.add_parser(
+        "backtest", help="Run baseline signal backtests against silver features"
+    )
+    backtest.add_argument("--path", help="Specific silver features CSV path")
+    backtest.add_argument("--horizon-seconds", type=int, default=30)
+    backtest.add_argument("--signal-window-seconds", type=int, default=5)
+    backtest.add_argument("--tick-size", type=float, default=0.25)
+    backtest.add_argument("--cost-ticks", type=float, default=2.0)
+    backtest.add_argument("--cooldown-seconds", type=int, default=0)
+    backtest.add_argument("--imbalance-threshold", type=float, default=0.20)
+    backtest.add_argument("--min-return-ticks", type=float, default=0.0)
+    backtest.add_argument("--max-spread-ticks", type=float, default=4.0)
+    backtest.add_argument("--json", action="store_true", help="Print JSON instead of Markdown")
+    backtest.add_argument("--no-write", action="store_true", help="Do not write report files")
+    backtest.set_defaults(handler=cmd_research_backtest)
+
+    signals = research_subparsers.add_parser(
+        "signals", help="Evaluate logged live candidate signals against feature labels"
+    )
+    signals.add_argument("--signal-path", help="Specific live signals JSONL path")
+    signals.add_argument("--feature-path", help="Specific silver features CSV path")
+    signals.add_argument("--horizon-seconds", type=int, default=30)
+    signals.add_argument("--tick-size", type=float, default=0.25)
+    signals.add_argument("--cost-ticks", type=float, default=2.0)
+    signals.add_argument("--max-match-lag-seconds", type=float, default=1.5)
+    signals.add_argument(
+        "--all-runs",
+        action="store_true",
+        help="Evaluate every row in the signal file instead of only the latest run",
+    )
+    signals.add_argument(
+        "--run-gap-seconds",
+        type=float,
+        default=120.0,
+        help="Timestamp gap used to split same-day signal files into runs",
+    )
+    signals.add_argument("--json", action="store_true", help="Print JSON instead of Markdown")
+    signals.add_argument("--no-write", action="store_true", help="Do not write report files")
+    signals.set_defaults(handler=cmd_research_signals)
 
     return parser
 
@@ -309,8 +386,21 @@ def cmd_run(args: Namespace) -> int:
                 events=args.record_events,
                 duration_seconds=args.record_duration_seconds,
                 no_live_features=args.record_no_live_features,
+                no_live_signals=args.record_no_live_signals,
+                no_finalize=args.record_no_finalize,
+                no_session_summary=args.record_no_session_summary,
                 feature_windows=args.record_feature_windows,
+                feature_horizons=args.feature_horizons,
                 feature_interval_seconds=args.record_feature_interval_seconds,
+                max_stale_quote_seconds=args.feature_max_stale_quote_seconds,
+                tick_size=args.tick_size,
+                signal_window_seconds=args.signal_window_seconds,
+                signal_cooldown_seconds=args.signal_cooldown_seconds,
+                signal_min_momentum_ticks=args.signal_min_momentum_ticks,
+                signal_max_spread_ticks=args.signal_max_spread_ticks,
+                signal_max_stale_quote_seconds=args.signal_max_stale_quote_seconds,
+                session_gap_threshold_seconds=args.session_gap_threshold_seconds,
+                session_stale_quote_seconds=args.session_stale_quote_seconds,
             )
         )
         if record_code:
@@ -645,17 +735,95 @@ def cmd_record(args: Namespace) -> int:
         else f"Recording real-time Project X data for {args.duration_seconds} seconds."
     )
     sys.stdout.flush()
-    return run_realtime_recorder(
+    recording_started_at = datetime.now(UTC)
+    code = run_realtime_recorder(
         RecordingConfig(
             contract_id=contract_id,
             events=args.events,
             data_dir=settings.data_dir,
             duration_seconds=args.duration_seconds,
             live_features=not args.no_live_features,
+            live_signals=not args.no_live_signals,
             feature_windows=args.feature_windows,
             feature_interval_seconds=args.feature_interval_seconds,
+            signal_window_seconds=args.signal_window_seconds,
+            signal_cooldown_seconds=args.signal_cooldown_seconds,
+            signal_min_momentum_ticks=args.signal_min_momentum_ticks,
+            signal_max_spread_ticks=args.signal_max_spread_ticks,
+            signal_max_stale_quote_seconds=args.signal_max_stale_quote_seconds,
+            signal_tick_size=args.tick_size,
         )
     )
+    if not args.no_finalize:
+        print_section("Finalize Recorded Data")
+        try:
+            finalize_realtime_capture(
+                data_dir=settings.data_dir,
+                windows=args.feature_windows,
+                horizons=args.feature_horizons,
+                interval_seconds=args.feature_interval_seconds,
+                max_stale_quote_seconds=args.max_stale_quote_seconds,
+                tick_size=args.tick_size,
+            )
+        except ValueError as exc:
+            print(f"skipped recorded-data finalization: {exc}")
+
+    if not args.no_session_summary:
+        print_section("Session Health")
+        try:
+            write_session_report(
+                settings=settings,
+                directory=None,
+                gap_threshold_seconds=args.session_gap_threshold_seconds,
+                stale_quote_seconds=args.session_stale_quote_seconds,
+                observed_since=recording_started_at,
+                as_json=False,
+                write=True,
+            )
+        except ValueError as exc:
+            print(f"skipped session health: {exc}")
+    return code
+
+
+def finalize_realtime_capture(
+    *,
+    data_dir: Path,
+    windows: str,
+    horizons: str,
+    interval_seconds: int,
+    max_stale_quote_seconds: int,
+    tick_size: float,
+) -> None:
+    directory = find_latest_realtime_dir(data_dir)
+    if directory is None:
+        raise ValueError("No real-time capture directory found.")
+
+    outputs = normalize_realtime_dir(directory, data_dir)
+    append_manifest(data_dir, outputs)
+    print_normalized_files(outputs)
+
+    quote_output = next((output for output in outputs if output.name == "quotes"), None)
+    if quote_output is None:
+        raise ValueError("No normalized quote file found for latest capture.")
+
+    result = build_intraday_features(
+        IntradayFeatureConfig(
+            data_dir=data_dir,
+            quote_path=quote_output.path,
+            windows_seconds=parse_int_list(windows),
+            horizons_seconds=parse_int_list(horizons),
+            interval_seconds=interval_seconds,
+            max_stale_quote_seconds=max_stale_quote_seconds,
+            tick_size=tick_size,
+        )
+    )
+    print(f"intraday features: {result.rows:,} rows")
+    print(f"  quotes: {result.quote_path}")
+    if result.trade_path:
+        print(f"  trades: {result.trade_path}")
+    if result.depth_path:
+        print(f"  depth: {result.depth_path}")
+    print(f"  output: {result.path}")
 
 
 def cmd_features_intraday(args: Namespace) -> int:
@@ -703,6 +871,140 @@ def cmd_research_ic(args: Namespace) -> int:
             settings.data_dir / "reports" / "research",
             stem,
             report.to_markdown(top=args.top),
+            report.to_dict(),
+        )
+        print(f"Saved reports: {md_path}, {json_path}")
+    return 0
+
+
+def cmd_research_backtest(args: Namespace) -> int:
+    settings = Settings.from_env()
+    path = Path(args.path) if args.path else find_latest_file(
+        settings.data_dir / "silver" / "projectx" / "features", "*.csv"
+    )
+    if path is None:
+        raise ValueError(
+            "No silver features CSV found. Run `axiom features intraday` or pass --path."
+        )
+
+    report = run_backtest(
+        BacktestConfig(
+            path=path,
+            horizon_seconds=args.horizon_seconds,
+            signal_window_seconds=args.signal_window_seconds,
+            tick_size=args.tick_size,
+            cost_ticks=args.cost_ticks,
+            cooldown_seconds=args.cooldown_seconds,
+            imbalance_threshold=args.imbalance_threshold,
+            min_return_ticks=args.min_return_ticks,
+            max_spread_ticks=args.max_spread_ticks,
+        )
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.to_markdown())
+
+    if not args.no_write:
+        stem = f"backtest_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+        md_path, json_path = write_report_pair(
+            settings.data_dir / "reports" / "research",
+            stem,
+            report.to_markdown(),
+            report.to_dict(),
+        )
+        print(f"Saved reports: {md_path}, {json_path}")
+    return 0
+
+
+def cmd_research_signals(args: Namespace) -> int:
+    settings = Settings.from_env()
+    signal_path = Path(args.signal_path) if args.signal_path else find_latest_file(
+        settings.data_dir / "live" / "projectx" / "signals", "signals.jsonl"
+    )
+    if signal_path is None:
+        raise ValueError(
+            "No live signal JSONL found. Run `axiom record` or pass --signal-path."
+        )
+
+    feature_path = Path(args.feature_path) if args.feature_path else find_latest_file(
+        settings.data_dir / "silver" / "projectx" / "features", "*.csv"
+    )
+    if feature_path is None:
+        raise ValueError(
+            "No silver features CSV found. Run `axiom features intraday` or pass --feature-path."
+        )
+
+    report = evaluate_signal_file(
+        SignalEvaluationConfig(
+            signal_path=signal_path,
+            feature_path=feature_path,
+            horizon_seconds=args.horizon_seconds,
+            tick_size=args.tick_size,
+            cost_ticks=args.cost_ticks,
+            max_match_lag_seconds=args.max_match_lag_seconds,
+            latest_run_only=not args.all_runs,
+            run_gap_seconds=args.run_gap_seconds,
+        )
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.to_markdown())
+
+    if not args.no_write:
+        stem = f"signals_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+        md_path, json_path = write_report_pair(
+            settings.data_dir / "reports" / "research",
+            stem,
+            report.to_markdown(),
+            report.to_dict(),
+        )
+        print(f"Saved reports: {md_path}, {json_path}")
+    return 0
+
+
+def cmd_session(args: Namespace) -> int:
+    settings = Settings.from_env()
+    return write_session_report(
+        settings=settings,
+        directory=Path(args.dir) if args.dir else None,
+        gap_threshold_seconds=args.gap_threshold_seconds,
+        stale_quote_seconds=args.stale_quote_seconds,
+        observed_since=parse_utc_datetime(args.since) if args.since else None,
+        as_json=args.json,
+        write=not args.no_write,
+    )
+
+
+def write_session_report(
+    *,
+    settings: Settings,
+    directory: Path | None,
+    gap_threshold_seconds: float,
+    stale_quote_seconds: float,
+    observed_since: datetime | None,
+    as_json: bool,
+    write: bool,
+) -> int:
+    report = analyze_session(
+        settings.data_dir,
+        directory=directory,
+        gap_threshold_seconds=gap_threshold_seconds,
+        stale_quote_seconds=stale_quote_seconds,
+        observed_since=observed_since,
+    )
+    if as_json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.to_markdown())
+
+    if write:
+        stem = f"session_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+        md_path, json_path = write_report_pair(
+            settings.data_dir / "reports" / "session",
+            stem,
+            report.to_markdown(),
             report.to_dict(),
         )
         print(f"Saved reports: {md_path}, {json_path}")

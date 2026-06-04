@@ -20,13 +20,6 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-If `python` is not on PATH, use the bundled Codex runtime once to create the venv:
-
-```powershell
-& 'C:\Users\Tony\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
 Create `.env` and fill in:
 
 ```text

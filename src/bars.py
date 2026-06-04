@@ -8,7 +8,7 @@ from typing import Any
 
 from projectx import BarUnit, fmt_dt, parse_dt, unit_seconds
 
-BAR_FIELDNAMES = ["t", "o", "h", "l", "c", "v"]
+BAR_FIELDNAMES = ["t", "o", "h", "l", "c", "v", "bv", "sv"]
 
 
 @dataclass(frozen=True)
@@ -20,25 +20,30 @@ class SessionBarsResult:
 
 
 def aggregate_trade_bars(
-    trades: list[tuple[float, float | None, float | None]],
+    trades: list[tuple[Any, ...]],
     interval_seconds: int,
 ) -> list[dict[str, Any]]:
-    """Aggregate (epoch_seconds, price, volume) trades into clock-aligned OHLCV bars.
+    """Aggregate trades into clock-aligned OHLCV bars with buy/sell volume.
 
-    Bars are bucketed on fixed `interval_seconds` boundaries in UTC. Open is the
-    first trade in the bucket, close the last, high/low the extremes, volume the
-    sum. Trades are sorted by time so open/close are correct regardless of input
-    order.
+    Each trade is (epoch_seconds, price, volume[, trade_type]). Bars bucket on
+    fixed `interval_seconds` boundaries in UTC: open is the first trade, close the
+    last, high/low the extremes, volume the sum. Buy volume (`bv`) is aggressor
+    type 0, sell volume (`sv`) is type 1; other types count toward volume only.
+    Trades are sorted by time so open/close are correct regardless of input order.
     """
     if interval_seconds <= 0:
         raise ValueError("interval_seconds must be positive")
 
     buckets: dict[int, dict[str, float]] = {}
-    for epoch, price, volume in sorted(trades, key=lambda item: item[0]):
+    for trade in sorted(trades, key=lambda item: item[0]):
+        epoch, price, volume = trade[0], trade[1], trade[2]
+        trade_type = trade[3] if len(trade) > 3 else None
         if price is None:
             continue
         bucket = int(epoch // interval_seconds) * interval_seconds
         added_volume = volume if volume is not None else 0.0
+        buy_volume = added_volume if trade_type == 0 else 0.0
+        sell_volume = added_volume if trade_type == 1 else 0.0
         bar = buckets.get(bucket)
         if bar is None:
             buckets[bucket] = {
@@ -47,12 +52,16 @@ def aggregate_trade_bars(
                 "l": price,
                 "c": price,
                 "v": added_volume,
+                "bv": buy_volume,
+                "sv": sell_volume,
             }
         else:
             bar["h"] = max(bar["h"], price)
             bar["l"] = min(bar["l"], price)
             bar["c"] = price
             bar["v"] += added_volume
+            bar["bv"] += buy_volume
+            bar["sv"] += sell_volume
 
     rows: list[dict[str, Any]] = []
     for bucket in sorted(buckets):
@@ -65,6 +74,8 @@ def aggregate_trade_bars(
                 "l": bar["l"],
                 "c": bar["c"],
                 "v": bar["v"],
+                "bv": bar["bv"],
+                "sv": bar["sv"],
             }
         )
     return rows
@@ -125,20 +136,36 @@ def load_continuous_bars(
                 if key:
                     target[key] = {**row, "t": key}
 
-    merged = dict(live_bars)
-    merged.update(api_bars)
+    merged: dict[str, dict[str, Any]] = {}
+    for key in set(api_bars) | set(live_bars):
+        api_row = api_bars.get(key)
+        live_row = live_bars.get(key)
+        if api_row and live_row:
+            # API wins on shared OHLCV; keep live-only fields (bv/sv) it lacks.
+            merged[key] = {**live_row, **api_row}
+        else:
+            merged[key] = api_row or live_row  # type: ignore[assignment]
     return [merged[key] for key in sorted(merged)]
 
 
-def read_session_trades(path: Path) -> list[tuple[float, float | None, float | None]]:
-    trades: list[tuple[float, float | None, float | None]] = []
+def read_session_trades(
+    path: Path,
+) -> list[tuple[float, float | None, float | None, int | None]]:
+    trades: list[tuple[float, float | None, float | None, int | None]] = []
     with path.open(encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
             timestamp = parse_dt(row.get("event_time")) or parse_dt(row.get("observed_at"))
             price = parse_float(row.get("price"))
             if timestamp is None or price is None:
                 continue
-            trades.append((timestamp.timestamp(), price, parse_float(row.get("volume"))))
+            trades.append(
+                (
+                    timestamp.timestamp(),
+                    price,
+                    parse_float(row.get("volume")),
+                    parse_int(row.get("trade_type")),
+                )
+            )
     return trades
 
 
@@ -188,3 +215,8 @@ def parse_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def parse_int(value: Any) -> int | None:
+    parsed = parse_float(value)
+    return int(parsed) if parsed is not None else None

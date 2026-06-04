@@ -370,30 +370,34 @@ class BarAggregator {
     this.bar = null;
   }
 
-  onTrade(eventMs, price, volume) {
+  onTrade(eventMs, price, volume, tradeType) {
     if (!Number.isFinite(eventMs) || !Number.isFinite(price)) return;
     const bucket = Math.floor(eventMs / this.intervalMs) * this.intervalMs;
     const addedVolume = Number.isFinite(volume) ? volume : 0;
+    const buyVolume = tradeType === 0 ? addedVolume : 0;
+    const sellVolume = tradeType === 1 ? addedVolume : 0;
 
     if (this.currentBucket === null) {
-      this.startBar(bucket, price, addedVolume);
+      this.startBar(bucket, price, addedVolume, buyVolume, sellVolume);
       return;
     }
     if (bucket < this.currentBucket) return; // late trade, keep bars monotonic
     if (bucket > this.currentBucket) {
       this.flush();
-      this.startBar(bucket, price, addedVolume);
+      this.startBar(bucket, price, addedVolume, buyVolume, sellVolume);
       return;
     }
     this.bar.h = Math.max(this.bar.h, price);
     this.bar.l = Math.min(this.bar.l, price);
     this.bar.c = price;
     this.bar.v += addedVolume;
+    this.bar.bv += buyVolume;
+    this.bar.sv += sellVolume;
   }
 
-  startBar(bucket, price, volume) {
+  startBar(bucket, price, volume, buyVolume, sellVolume) {
     this.currentBucket = bucket;
-    this.bar = { o: price, h: price, l: price, c: price, v: volume };
+    this.bar = { o: price, h: price, l: price, c: price, v: volume, bv: buyVolume, sv: sellVolume };
   }
 
   flush() {
@@ -405,11 +409,13 @@ class BarAggregator {
       l: this.bar.l,
       c: this.bar.c,
       v: this.bar.v,
+      bv: this.bar.bv,
+      sv: this.bar.sv,
     };
     appendJsonl(liveBarFile(this.dataDir, this.contractId), payload);
     console.log(
       `${payload.t} bar o=${payload.o} h=${payload.h} l=${payload.l} ` +
-      `c=${payload.c} v=${payload.v}`,
+      `c=${payload.c} v=${payload.v} delta=${payload.bv - payload.sv}`,
     );
     this.bar = null;
     this.currentBucket = null;
@@ -526,7 +532,12 @@ class ProjectXMarketRecorder {
       const observedMs = Date.parse(observedAt);
       for (const record of recordList(data)) {
         const eventMs = parseTimestamp(record.timestamp) ?? observedMs;
-        this.barAggregator.onTrade(eventMs, Number(record.price), Number(record.volume || 0));
+        this.barAggregator.onTrade(
+          eventMs,
+          Number(record.price),
+          Number(record.volume || 0),
+          Number(record.type),
+        );
       }
     }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 import csv
 import tempfile
@@ -10,7 +11,10 @@ from bar_features import (
     BarFeatureConfig,
     build_bar_features,
     compute_bar_features,
+    compute_order_flow,
+    compute_session_reference,
     ema,
+    model_feature_columns,
     rsi,
     vwap_by_session,
 )
@@ -92,6 +96,98 @@ class VwapTests(unittest.TestCase):
         self.assertAlmostEqual(out[0], 10.0)
         self.assertAlmostEqual(out[1], (10 * 1 + 20 * 3) / 4)  # 17.5, same session
         self.assertAlmostEqual(out[2], 30.0)  # new session resets the accumulation
+
+
+class SessionReferenceTests(unittest.TestCase):
+    def test_opening_range_prior_day_overnight_gap_rvol(self) -> None:
+        # All July 2026 (EDT, UTC-4): 13:30 UTC = 09:30 ET cash open.
+        times = [
+            datetime(2026, 7, 1, 13, 30, tzinfo=UTC),  # day1 09:30 (OR window)
+            datetime(2026, 7, 1, 13, 45, tzinfo=UTC),  # day1 09:45 (OR window)
+            datetime(2026, 7, 1, 14, 15, tzinfo=UTC),  # day1 10:15 (post-OR)
+            datetime(2026, 7, 1, 22, 0, tzinfo=UTC),   # day1 18:00 overnight
+            datetime(2026, 7, 2, 13, 30, tzinfo=UTC),  # day2 09:30 open
+        ]
+        opens = [100.0, 100.0, 108.0, 111.0, 100.0]
+        highs = [105.0, 110.0, 112.0, 120.0, 101.0]
+        lows = [95.0, 98.0, 107.0, 90.0, 99.0]
+        closes = [100.0, 108.0, 111.0, 95.0, 100.0]
+        volumes = [10.0, 20.0, 15.0, 5.0, 8.0]
+
+        ref = compute_session_reference(times, opens, highs, lows, closes, volumes)
+
+        # Post opening-range bar: OR = high/low of the first 30 min (110 / 95),
+        # close 111 breaks out above it.
+        self.assertEqual(ref[2]["or_high"], 110.0)
+        self.assertEqual(ref[2]["or_low"], 95.0)
+        self.assertEqual(ref[2]["or_breakout"], 1)
+        self.assertEqual(ref[2]["prior_rth_high"], "")  # no prior day yet
+        self.assertAlmostEqual(ref[2]["dist_round_100"], 11 / 111)
+        self.assertAlmostEqual(ref[2]["dist_or_high"], 111 / 110 - 1)
+        self.assertAlmostEqual(ref[2]["dist_or_low"], 111 / 95 - 1)
+
+        # Overnight bar: reference levels blank, but rvol/round still computed.
+        self.assertEqual(ref[3]["prior_rth_high"], "")
+        self.assertEqual(ref[3]["or_breakout"], "")
+
+        # Day 2 open: prior-day levels, overnight high/low, and the gap are known.
+        self.assertEqual(ref[4]["prior_rth_high"], 112.0)
+        self.assertEqual(ref[4]["prior_rth_low"], 95.0)
+        self.assertEqual(ref[4]["prior_rth_close"], 111.0)
+        self.assertEqual(ref[4]["overnight_high"], 120.0)
+        self.assertEqual(ref[4]["overnight_low"], 90.0)
+        self.assertAlmostEqual(ref[4]["gap"], 100 / 111 - 1)
+        self.assertAlmostEqual(ref[4]["dist_prior_high"], 100 / 112 - 1)
+        self.assertAlmostEqual(ref[4]["dist_prior_close"], 100 / 111 - 1)
+        self.assertAlmostEqual(ref[4]["dist_overnight_high"], 100 / 120 - 1)
+        self.assertAlmostEqual(ref[4]["dist_overnight_low"], 100 / 90 - 1)
+        self.assertEqual(ref[4]["or_breakout"], "")  # OR still forming at the open
+        # rvol: 09:30 volume 8 vs the only prior 09:30 bar (volume 10) = 0.8.
+        self.assertAlmostEqual(ref[4]["rvol"], 0.8)
+
+
+class OrderFlowTests(unittest.TestCase):
+    def test_delta_ratio_and_session_cumulative(self) -> None:
+        buy = [5.0, 1.0, None, 4.0]
+        sell = [2.0, 3.0, None, 1.0]
+        volumes = [7.0, 4.0, 10.0, 5.0]
+        sessions = ["2026-06-04", "2026-06-04", "2026-06-04", "2026-06-05"]
+
+        out = compute_order_flow(buy, sell, volumes, sessions)
+
+        self.assertEqual(out[0]["delta"], 3.0)  # 5 - 2
+        self.assertAlmostEqual(out[0]["delta_ratio"], 3.0 / 7.0)
+        self.assertEqual(out[0]["cum_delta"], 3.0)
+        self.assertEqual(out[1]["delta"], -2.0)  # 1 - 3
+        self.assertEqual(out[1]["cum_delta"], 1.0)  # 3 + (-2)
+        # No aggressor data (e.g. an API history bar) -> blank, cumulative held.
+        self.assertEqual(out[2]["delta"], "")
+        self.assertEqual(out[2]["cum_delta"], "")
+        # New session resets the running delta.
+        self.assertEqual(out[3]["delta"], 3.0)  # 4 - 1
+        self.assertEqual(out[3]["cum_delta"], 3.0)
+        # cum_delta_ratio normalizes the running delta by session volume.
+        self.assertAlmostEqual(out[0]["cum_delta_ratio"], 3.0 / 7.0)
+        self.assertAlmostEqual(out[1]["cum_delta_ratio"], 1.0 / 11.0)  # 1 / (7+4)
+        self.assertEqual(out[2]["cum_delta_ratio"], "")
+        self.assertAlmostEqual(out[3]["cum_delta_ratio"], 3.0 / 5.0)  # session reset
+
+
+class ModelColumnsTests(unittest.TestCase):
+    def test_excludes_raw_levels_keeps_stationary(self) -> None:
+        cols = set(model_feature_columns([5, 20, 60]))
+        # Stationary distances / ratios / oscillators are kept.
+        for name in (
+            "dist_vwap", "dist_ema_9", "dist_prior_close", "dist_or_high",
+            "delta_ratio", "cum_delta_ratio", "return_5bar", "rsi_9", "is_rth",
+        ):
+            self.assertIn(name, cols)
+        # Identifiers and raw price/volume levels are excluded.
+        for name in (
+            "t", "o", "c", "v", "vwap", "ema_9", "prior_rth_high",
+            "overnight_low", "or_high", "delta", "cum_delta",
+        ):
+            self.assertNotIn(name, cols)
 
 
 class BuildBarFeaturesTests(unittest.TestCase):

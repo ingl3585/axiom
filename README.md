@@ -84,11 +84,48 @@ windows (`AXIOM`-configurable timeframe defines what a "bar" is):
 - `range_pos_{N}bar` — where price sits in its N-bar high/low range, 0..1 (mean-reversion oscillator)
 - `vol_ratio_{N}bar` — volume vs its N-bar average (activity)
 
-plus per bar: `return_1`, `bar_range`, a 9-period `rsi_9`, `ema_9`/`ema_21` (the
-classic 9/21 EMA crossover pair), and `vwap`/`dist_vwap` (session volume-weighted
-average price — reset each UTC day — and price's distance from it). Every column
-is backward-looking only, so a row never uses a future bar. The table lands in
-`silver/projectx/features/bars/`.
+plus per bar: `return_1`, `bar_range`, a 9-period `rsi_9`, and `ema_9`/`ema_21`
+(the classic 9/21 EMA crossover pair). Every column is backward-looking only, so
+a row never uses a future bar. The table lands in `silver/projectx/features/bars/`.
+
+### Day-trading features (MNQ)
+
+The table also carries features built around the US cash session (RTH,
+09:30–16:00 ET), with daylight-savings handled in `session.py` (no external tz
+dependency):
+
+- **Time/session**: `minutes_since_open`, `session_bucket`
+  (overnight/open_hour/lunch/midday/close_hour), `is_rth`, `minutes_to_event`
+  (proximity to 08:30 / 10:00 / 14:00 ET).
+- **VWAP** (`vwap`, `dist_vwap`, `vwap_sigma`): anchored to the 09:30 ET open and
+  reset each session, with a volume-weighted sigma band z-score.
+- **Opening range** (`or_high`, `or_low`, `or_breakout`): high/low of the first
+  30 RTH minutes and whether price is above/inside/below it.
+- **Reference levels** (RTH bars only): `prior_rth_high/low/close`,
+  `dist_prior_high/low`, `overnight_high/low`, `gap` (open vs prior close), and
+  `dist_round_100` (nearest round level).
+- **Relative volume** (`rvol`): volume vs the average for this same minute of the
+  session on prior days.
+- **Order flow** (`delta`, `delta_ratio`, `cum_delta`): aggressor buy minus sell
+  volume per bar, per-bar pressure, and the session-cumulative delta. Buy volume
+  is trade type 0, sell volume type 1. Available only for sessions recorded live
+  (the History API returns OHLCV with no aggressor side), so these are blank over
+  the API-only history and populate on your recorded sessions.
+
+All of these use completed past data only — no lookahead.
+
+### Model features vs reference levels
+
+Some columns are raw price levels (`vwap`, `ema_9`/`ema_21`, `prior_rth_*`,
+`overnight_*`, `or_high`/`or_low`) or raw volume counts (`delta`, `cum_delta`).
+These are non-stationary — handy as on-chart reference levels, but a model should
+not train on them directly, since their absolute scale drifts over time. Each has
+a stationary counterpart: `dist_vwap`/`vwap_sigma`, `dist_ema_9`/`dist_ema_21`,
+`dist_prior_*`, `dist_overnight_*`, `dist_or_*`, `delta_ratio`, `cum_delta_ratio`.
+
+`bar_features.model_feature_columns()` returns the stationary, model-ready subset
+(identifiers and raw levels excluded); the raw levels remain in the table for
+reference and plotting.
 
 ## Data Layout
 

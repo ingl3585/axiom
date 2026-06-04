@@ -40,6 +40,24 @@ class AggregateTradeBarsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             aggregate_trade_bars([(0.0, 100.0, 1.0)], interval_seconds=0)
 
+    def test_tracks_buy_sell_aggressor_volume(self) -> None:
+        # (epoch, price, volume, trade_type): type 0 = buy, type 1 = sell.
+        trades = [
+            (0.0, 100.0, 5.0, 0),
+            (10.0, 101.0, 3.0, 1),
+            (20.0, 102.0, 2.0, 0),
+        ]
+        bars = aggregate_trade_bars(trades, interval_seconds=60)
+        self.assertEqual(len(bars), 1)
+        self.assertEqual(bars[0]["v"], 10.0)
+        self.assertEqual(bars[0]["bv"], 7.0)  # 5 + 2 buys
+        self.assertEqual(bars[0]["sv"], 3.0)
+
+    def test_missing_trade_type_yields_zero_buy_sell(self) -> None:
+        bars = aggregate_trade_bars([(0.0, 100.0, 5.0)], interval_seconds=60)
+        self.assertEqual(bars[0]["bv"], 0.0)
+        self.assertEqual(bars[0]["sv"], 0.0)
+
 
 class ContinuousBarsTests(unittest.TestCase):
     def test_api_bars_win_over_live_at_overlap(self) -> None:

@@ -10,6 +10,7 @@ from typing import Any
 from bars import load_continuous_bars, parse_float
 from projectx import BarUnit, parse_dt, safe_partition_value
 from session import (
+    eastern_minutes,
     is_rth,
     minutes_since_open,
     minutes_to_nearest_event,
@@ -21,6 +22,28 @@ DEFAULT_BAR_FEATURE_WINDOWS = [5, 20, 60]
 RSI_PERIOD = 9
 EMA_FAST_PERIOD = 9
 EMA_SLOW_PERIOD = 21
+OPENING_RANGE_MINUTES = 30
+ROUND_LEVEL = 100.0
+
+# Reference-level features, populated only on RTH bars; blank otherwise.
+REFERENCE_FIELDS = (
+    "prior_rth_high",
+    "prior_rth_low",
+    "prior_rth_close",
+    "dist_prior_high",
+    "dist_prior_low",
+    "dist_prior_close",
+    "overnight_high",
+    "overnight_low",
+    "dist_overnight_high",
+    "dist_overnight_low",
+    "gap",
+    "or_high",
+    "or_low",
+    "or_breakout",
+    "dist_or_high",
+    "dist_or_low",
+)
 
 
 @dataclass(frozen=True)
@@ -69,6 +92,8 @@ def compute_bar_features(
     lows: list[float | None] = []
     closes: list[float] = []
     volumes: list[float] = []
+    buy_volumes: list[float | None] = []
+    sell_volumes: list[float | None] = []
     for bar in bars:
         close = parse_float(bar.get("c"))
         if close is None:
@@ -79,6 +104,8 @@ def compute_bar_features(
         lows.append(parse_float(bar.get("l")))
         closes.append(close)
         volumes.append(parse_float(bar.get("v")) or 0.0)
+        buy_volumes.append(parse_float(bar.get("bv")))
+        sell_volumes.append(parse_float(bar.get("sv")))
 
     count = len(closes)
     returns = [0.0] * count
@@ -99,6 +126,10 @@ def compute_bar_features(
     vwap_values, vwap_sigma_values = session_vwap(
         highs, lows, closes, volumes, session_keys
     )
+    reference = compute_session_reference(
+        parsed_times, opens, highs, lows, closes, volumes
+    )
+    order_flow = compute_order_flow(buy_volumes, sell_volumes, volumes, session_keys)
 
     rows: list[dict[str, Any]] = []
     for index in range(count):
@@ -114,6 +145,8 @@ def compute_bar_features(
             f"rsi_{RSI_PERIOD}": blank_if_none(rsi_values[index]),
             f"ema_{EMA_FAST_PERIOD}": blank_if_none(ema_fast[index]),
             f"ema_{EMA_SLOW_PERIOD}": blank_if_none(ema_slow[index]),
+            f"dist_ema_{EMA_FAST_PERIOD}": dist_from(closes[index], ema_fast[index]),
+            f"dist_ema_{EMA_SLOW_PERIOD}": dist_from(closes[index], ema_slow[index]),
             "vwap": blank_if_none(vwap_values[index]),
             "dist_vwap": dist_from(closes[index], vwap_values[index]),
             "vwap_sigma": vwap_zscore(
@@ -121,6 +154,8 @@ def compute_bar_features(
             ),
         }
         row.update(time_features(parsed_times[index]))
+        row.update(reference[index])
+        row.update(order_flow[index])
         for window in windows:
             add_window_features(
                 row,
@@ -354,6 +389,182 @@ def time_features(parsed: datetime | None) -> dict[str, Any]:
     }
 
 
+def compute_session_reference(
+    parsed_times: list[datetime | None],
+    opens: list[float | None],
+    highs: list[float | None],
+    lows: list[float | None],
+    closes: list[float],
+    volumes: list[float],
+) -> list[dict[str, Any]]:
+    """Day-trading reference features in one causal forward pass.
+
+    Opening range, prior-RTH-day levels, overnight high/low, the opening gap,
+    relative volume, and distance to the nearest round level. Reference levels
+    are exposed on RTH bars only (they are still forming or undefined otherwise),
+    and everything uses completed past data only, so there is no lookahead.
+    """
+    count = len(closes)
+    out: list[dict[str, Any]] = []
+
+    cur_rth_date = None
+    cur_high = cur_low = cur_close = None
+    prior_high = prior_low = prior_close = None
+    or_high = or_low = None
+    or_complete = False
+    overnight_high = overnight_low = None  # accumulating toward the next open
+    day_overnight_high = day_overnight_low = None  # frozen at this day's open
+    gap = None
+    minute_volume: dict[int, list[float]] = {}
+
+    for index in range(count):
+        parsed = parsed_times[index]
+        close = closes[index]
+        high = highs[index]
+        low = lows[index]
+        volume = volumes[index]
+        feat: dict[str, Any] = {}
+
+        if parsed is None:
+            feat["rvol"] = ""
+            feat["dist_round_100"] = ""
+            feat.update(dict.fromkeys(REFERENCE_FIELDS, ""))
+            out.append(feat)
+            continue
+
+        # Relative volume vs prior bars at the same ET minute-of-day (causal).
+        minute = eastern_minutes(parsed)
+        bucket = minute_volume.get(minute)
+        if bucket and bucket[1] > 0 and bucket[0] > 0:
+            feat["rvol"] = volume / (bucket[0] / bucket[1])
+        else:
+            feat["rvol"] = ""
+        if bucket is None:
+            minute_volume[minute] = [volume, 1.0]
+        else:
+            bucket[0] += volume
+            bucket[1] += 1.0
+
+        nearest = round(close / ROUND_LEVEL) * ROUND_LEVEL
+        feat["dist_round_100"] = (close - nearest) / close if close else ""
+
+        if is_rth(parsed):
+            minutes = minutes_since_open(parsed)
+            rth_date = session_day(parsed)
+            if rth_date != cur_rth_date:
+                if cur_rth_date is not None:
+                    prior_high, prior_low, prior_close = cur_high, cur_low, cur_close
+                cur_rth_date = rth_date
+                cur_high, cur_low, cur_close = high, low, close
+                day_open = opens[index] if opens[index] is not None else close
+                day_overnight_high, day_overnight_low = overnight_high, overnight_low
+                overnight_high = overnight_low = None
+                gap = (day_open / prior_close - 1) if prior_close else None
+                or_high, or_low = high, low
+                or_complete = False
+            else:
+                cur_high = max_opt(cur_high, high)
+                cur_low = min_opt(cur_low, low)
+                cur_close = close
+                if 0 <= minutes < OPENING_RANGE_MINUTES:
+                    or_high = max_opt(or_high, high)
+                    or_low = min_opt(or_low, low)
+            if minutes >= OPENING_RANGE_MINUTES:
+                or_complete = True
+
+            feat["prior_rth_high"] = blank_if_none(prior_high)
+            feat["prior_rth_low"] = blank_if_none(prior_low)
+            feat["prior_rth_close"] = blank_if_none(prior_close)
+            feat["dist_prior_high"] = dist_from(close, prior_high)
+            feat["dist_prior_low"] = dist_from(close, prior_low)
+            feat["dist_prior_close"] = dist_from(close, prior_close)
+            feat["overnight_high"] = blank_if_none(day_overnight_high)
+            feat["overnight_low"] = blank_if_none(day_overnight_low)
+            feat["dist_overnight_high"] = dist_from(close, day_overnight_high)
+            feat["dist_overnight_low"] = dist_from(close, day_overnight_low)
+            feat["gap"] = blank_if_none(gap)
+            if or_complete and or_high is not None and or_low is not None:
+                feat["or_high"] = or_high
+                feat["or_low"] = or_low
+                feat["or_breakout"] = 1 if close > or_high else -1 if close < or_low else 0
+                feat["dist_or_high"] = dist_from(close, or_high)
+                feat["dist_or_low"] = dist_from(close, or_low)
+            else:
+                feat["or_high"] = ""
+                feat["or_low"] = ""
+                feat["or_breakout"] = ""
+                feat["dist_or_high"] = ""
+                feat["dist_or_low"] = ""
+        else:
+            overnight_high = max_opt(overnight_high, high)
+            overnight_low = min_opt(overnight_low, low)
+            feat.update(dict.fromkeys(REFERENCE_FIELDS, ""))
+
+        out.append(feat)
+    return out
+
+
+def compute_order_flow(
+    buy_volumes: list[float | None],
+    sell_volumes: list[float | None],
+    volumes: list[float],
+    session_keys: list[str],
+) -> list[dict[str, Any]]:
+    """Per-bar and session-cumulative order-flow delta (buy minus sell volume).
+
+    `delta` = buy - sell volume, `delta_ratio` = delta / volume (bar pressure,
+    -1..1), `cum_delta` = running delta since the session open. Bars without
+    aggressor data (e.g. API history bars) are blank and do not advance the
+    cumulative.
+    """
+    count = len(volumes)
+    out: list[dict[str, Any]] = []
+    cumulative = 0.0
+    cumulative_volume = 0.0
+    current_session: str | None = None
+    for index in range(count):
+        if session_keys[index] != current_session:
+            current_session = session_keys[index]
+            cumulative = 0.0
+            cumulative_volume = 0.0
+        buy = buy_volumes[index]
+        sell = sell_volumes[index]
+        if buy is None or sell is None:
+            out.append(
+                {"delta": "", "delta_ratio": "", "cum_delta": "", "cum_delta_ratio": ""}
+            )
+            continue
+        delta = buy - sell
+        cumulative += delta
+        volume = volumes[index]
+        cumulative_volume += volume
+        out.append(
+            {
+                "delta": delta,
+                "delta_ratio": delta / volume if volume else "",
+                "cum_delta": cumulative,
+                "cum_delta_ratio": cumulative / cumulative_volume if cumulative_volume else "",
+            }
+        )
+    return out
+
+
+def max_opt(current: float | None, value: float | None) -> float | None:
+    if value is None:
+        return current
+    if current is None:
+        return value
+    return max(current, value)
+
+
+def min_opt(current: float | None, value: float | None) -> float | None:
+    if value is None:
+        return current
+    if current is None:
+        return value
+    return min(current, value)
+
+
 def bar_feature_fieldnames(windows: list[int]) -> list[str]:
     fields = [
         "t",
@@ -367,6 +578,8 @@ def bar_feature_fieldnames(windows: list[int]) -> list[str]:
         f"rsi_{RSI_PERIOD}",
         f"ema_{EMA_FAST_PERIOD}",
         f"ema_{EMA_SLOW_PERIOD}",
+        f"dist_ema_{EMA_FAST_PERIOD}",
+        f"dist_ema_{EMA_SLOW_PERIOD}",
         "vwap",
         "dist_vwap",
         "vwap_sigma",
@@ -374,6 +587,13 @@ def bar_feature_fieldnames(windows: list[int]) -> list[str]:
         "session_bucket",
         "is_rth",
         "minutes_to_event",
+        "rvol",
+        "dist_round_100",
+        *REFERENCE_FIELDS,
+        "delta",
+        "delta_ratio",
+        "cum_delta",
+        "cum_delta_ratio",
     ]
     for window in windows:
         fields.extend(
@@ -386,6 +606,46 @@ def bar_feature_fieldnames(windows: list[int]) -> list[str]:
             ]
         )
     return fields
+
+
+def non_model_columns() -> set[str]:
+    """Identifiers and raw price/volume levels — non-stationary.
+
+    These are useful as reference/levels (plotting, rules like "near prior
+    high"), but a model should not train on them directly.
+    """
+    return {
+        "t",
+        "o",
+        "h",
+        "l",
+        "c",
+        "v",
+        f"ema_{EMA_FAST_PERIOD}",
+        f"ema_{EMA_SLOW_PERIOD}",
+        "vwap",
+        "prior_rth_high",
+        "prior_rth_low",
+        "prior_rth_close",
+        "overnight_high",
+        "overnight_low",
+        "or_high",
+        "or_low",
+        "delta",
+        "cum_delta",
+    }
+
+
+def model_feature_columns(windows: list[int] | None = None) -> list[str]:
+    """The stationary, model-ready subset of the feature table.
+
+    Excludes timestamp/OHLCV identifiers and raw price/volume levels, leaving the
+    distances, ratios, oscillators, and bounded session/time features a model can
+    actually generalize from.
+    """
+    selected = sorted(set(windows or DEFAULT_BAR_FEATURE_WINDOWS))
+    exclude = non_model_columns()
+    return [name for name in bar_feature_fieldnames(selected) if name not in exclude]
 
 
 def prefix_sum(values: list[float]) -> list[float]:

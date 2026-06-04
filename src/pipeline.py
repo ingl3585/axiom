@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
+from bar_features import BarFeatureConfig, build_bar_features, contract_part_from_id
 from bars import build_session_bars, date_contract_partitions, load_continuous_bars
 from config import Settings
 from features import IntradayFeatureConfig, build_intraday_features
@@ -54,6 +55,9 @@ def run_pipeline() -> int:
 
     print_section("Features")
     build_latest_features(settings)
+
+    print_section("Bar Features")
+    build_bar_feature_table(settings, backfill_result.contract.id)
 
     print_section("Live Recording")
     code = record_live_data(
@@ -143,6 +147,22 @@ def build_latest_features(settings: Settings) -> None:
         print(f"skipped features: {exc}")
         return
     print_feature_result(result)
+
+
+def build_bar_feature_table(settings: Settings, contract_id: str) -> None:
+    result = build_bar_features(
+        BarFeatureConfig(
+            data_dir=settings.data_dir,
+            contract_part=contract_part_from_id(contract_id),
+            unit=bar_unit_from_name(settings.bar_unit),
+            unit_number=settings.bar_unit_number,
+        )
+    )
+    if result.bars == 0:
+        print("skipped bar features: no continuous bars found.")
+        return
+    print(f"bar features: {result.rows:,} rows from {result.bars:,} bars")
+    print(f"  output: {result.path}")
 
 
 def record_live_data(settings: Settings, contract_id: str) -> int:

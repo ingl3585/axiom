@@ -72,6 +72,24 @@ its interval closes, to `live/projectx/bars/.../bars.jsonl` (interval =
 signal/execution engine will read to act on the just-closed bar; the bronze
 continuous series above is the canonical dataset for offline work.
 
+## Bar Features (Indicators)
+
+From the continuous bar series Axiom computes a table of trailing indicators —
+the inputs a strategy reads to decide what to do. For each bar, over 5/20/60-bar
+windows (`AXIOM`-configurable timeframe defines what a "bar" is):
+
+- `return_{N}bar` — price change over the last N bars (momentum)
+- `dist_sma_{N}bar` — distance of price from its N-bar moving average (trend)
+- `vol_{N}bar` — volatility (std of 1-bar returns) over N bars
+- `range_pos_{N}bar` — where price sits in its N-bar high/low range, 0..1 (mean-reversion oscillator)
+- `vol_ratio_{N}bar` — volume vs its N-bar average (activity)
+
+plus per bar: `return_1`, `bar_range`, a 9-period `rsi_9`, `ema_9`/`ema_21` (the
+classic 9/21 EMA crossover pair), and `vwap`/`dist_vwap` (session volume-weighted
+average price — reset each UTC day — and price's distance from it). Every column
+is backward-looking only, so a row never uses a future bar. The table lands in
+`silver/projectx/features/bars/`.
+
 ## Data Layout
 
 ```text
@@ -81,6 +99,7 @@ data/
   bronze/projectx/            normalized CSV tables
   bronze/projectx/bars/       API + live-built OHLCV bars (continuous series)
   silver/projectx/features/   model/research-ready feature tables
+  silver/projectx/features/bars/  bar-based indicator tables
   live/projectx/features/     rolling live feature snapshots
   live/projectx/bars/         real-time OHLCV bars emitted as each interval closes
   state/history_state.json    historical backfill resume state

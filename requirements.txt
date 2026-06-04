@@ -1,0 +1,6 @@
+# Runtime dependencies
+#
+# Axiom currently uses only the Python standard library at runtime.
+
+# Developer tooling
+ruff>=0.6

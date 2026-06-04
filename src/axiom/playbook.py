@@ -1,37 +1,54 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 import csv
-import hashlib
 import math
-from typing import Any, Callable
+from typing import Any
 
-from .qa import fmt_number, parse_dt
-from .research import parse_float
-
-
-SignalFn = Callable[[dict[str, str]], int]
+from .projectx import parse_dt
 
 
 @dataclass(frozen=True)
-class BacktestConfig:
+class PlaybookConfig:
     path: Path
     horizon_seconds: int = 30
-    signal_window_seconds: int = 5
     tick_size: float = 0.25
     cost_ticks: float = 2.0
-    cooldown_seconds: int = 0
-    imbalance_threshold: float = 0.20
-    min_return_ticks: float = 0.0
-    max_spread_ticks: float = 4.0
+    cooldown_seconds: int = 30
+    impulse_window_seconds: int = 30
+    trigger_window_seconds: int = 5
+    min_impulse_ticks: float = 12.0
+    min_trigger_ticks: float = 2.0
+    min_flow_imbalance: float = 0.20
+    min_trigger_volume: float = 20.0
+    max_spread_ticks: float = 2.0
+
+
+def parse_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def fmt_number(value: float | int | None, decimals: int = 2) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, int):
+        return f"{value:,}"
+    if not math.isfinite(value):
+        return "n/a"
+    return f"{value:,.{decimals}f}"
 
 
 @dataclass(frozen=True)
-class Candidate:
-    name: str
-    description: str
-    signal: SignalFn
+class SetupDecision:
+    direction: int
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -55,10 +72,11 @@ class Trade:
 
 
 @dataclass(frozen=True)
-class CandidateBacktest:
+class PlaybookResult:
     name: str
     description: str
     trades: list[Trade]
+    reason_counts: Counter[str]
 
     @property
     def trade_count(self) -> int:
@@ -76,9 +94,6 @@ class CandidateBacktest:
         if not self.trades:
             return None
         return sum(1 for trade in self.trades if trade.net_ticks > 0) / len(self.trades)
-
-    def avg_gross_ticks(self) -> float | None:
-        return mean([trade.gross_ticks for trade in self.trades])
 
     def avg_net_ticks(self) -> float | None:
         return mean([trade.net_ticks for trade in self.trades])
@@ -119,202 +134,213 @@ class CandidateBacktest:
             "longs": self.long_count,
             "shorts": self.short_count,
             "win_rate": self.win_rate(),
-            "avg_gross_ticks": self.avg_gross_ticks(),
             "avg_net_ticks": self.avg_net_ticks(),
             "total_net_ticks": self.total_net_ticks(),
             "profit_factor": finite_or_none(self.profit_factor()),
             "max_drawdown_ticks": self.max_drawdown_ticks(),
             "avg_mfe_ticks": self.avg_mfe_ticks(),
             "avg_mae_ticks": self.avg_mae_ticks(),
+            "reason_counts": dict(self.reason_counts),
             "sample_trades": [trade.to_dict() for trade in self.trades[:10]],
         }
 
 
 @dataclass(frozen=True)
-class BacktestReport:
+class PlaybookReport:
     path: Path
     rows: int
     horizon_seconds: int
-    signal_window_seconds: int
     tick_size: float
     cost_ticks: float
     cooldown_seconds: int
-    candidates: list[CandidateBacktest]
+    config: PlaybookConfig
+    result: PlaybookResult
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "path": str(self.path),
             "rows": self.rows,
             "horizon_seconds": self.horizon_seconds,
-            "signal_window_seconds": self.signal_window_seconds,
             "tick_size": self.tick_size,
             "cost_ticks": self.cost_ticks,
             "cooldown_seconds": self.cooldown_seconds,
-            "candidates": [candidate.to_dict() for candidate in self.candidates],
+            "playbook": self.result.to_dict(),
+            "config": {
+                "impulse_window_seconds": self.config.impulse_window_seconds,
+                "trigger_window_seconds": self.config.trigger_window_seconds,
+                "min_impulse_ticks": self.config.min_impulse_ticks,
+                "min_trigger_ticks": self.config.min_trigger_ticks,
+                "min_flow_imbalance": self.config.min_flow_imbalance,
+                "min_trigger_volume": self.config.min_trigger_volume,
+                "max_spread_ticks": self.config.max_spread_ticks,
+            },
         }
 
     def to_markdown(self) -> str:
+        result = self.result
         lines = [
-            "# Axiom Research Backtest",
+            "# Axiom Playbook Evaluation",
             "",
             f"- File: `{self.path}`",
             f"- Rows: {self.rows:,}",
+            f"- Playbook: {result.name}",
             f"- Horizon: {self.horizon_seconds:,} seconds",
-            f"- Signal window: {self.signal_window_seconds:,} seconds",
             f"- Cost: {fmt_number(self.cost_ticks)} ticks/trade",
             f"- Cooldown: {self.cooldown_seconds:,} seconds",
             "",
+            result.description,
+            "",
+            "## Setup",
+            "",
+            f"- Impulse window: {self.config.impulse_window_seconds:,} seconds",
+            f"- Trigger window: {self.config.trigger_window_seconds:,} seconds",
+            f"- Minimum impulse: {fmt_number(self.config.min_impulse_ticks)} ticks",
+            f"- Minimum reversal trigger: {fmt_number(self.config.min_trigger_ticks)} ticks",
+            f"- Minimum trigger flow imbalance: {fmt_number(self.config.min_flow_imbalance)}",
+            f"- Minimum trigger volume: {fmt_number(self.config.min_trigger_volume)}",
+            f"- Maximum average spread: {fmt_number(self.config.max_spread_ticks)} ticks",
+            "",
+            "## Candidate Performance",
+            "",
+            "| trades | long/short | win % | avg net | total net | pf | max dd | avg mfe | avg mae |",
+            "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             (
-                "This is a research harness, not an execution simulator. It evaluates "
-                "candidate rules on feature rows using forward labels. If cooldown is "
-                "0, trades can overlap."
+                f"| {result.trade_count:,} | {result.long_count:,}/{result.short_count:,} | "
+                f"{fmt_percent(result.win_rate())} | {fmt_number(result.avg_net_ticks())} | "
+                f"{fmt_number(result.total_net_ticks())} | {fmt_number(result.profit_factor())} | "
+                f"{fmt_number(result.max_drawdown_ticks())} | {fmt_number(result.avg_mfe_ticks())} | "
+                f"{fmt_number(result.avg_mae_ticks())} |"
             ),
             "",
-            "| candidate | trades | long/short | win % | avg net | total net | pf | max dd | avg mfe | avg mae |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "## Setup Reasons",
+            "",
+            "| reason | rows |",
+            "| --- | ---: |",
         ]
-        for candidate in sorted(
-            self.candidates,
-            key=lambda item: item.avg_net_ticks() if item.avg_net_ticks() is not None else -math.inf,
-            reverse=True,
-        ):
-            lines.append(
-                f"| {candidate.name} | {candidate.trade_count:,} | "
-                f"{candidate.long_count:,}/{candidate.short_count:,} | "
-                f"{fmt_percent(candidate.win_rate())} | "
-                f"{fmt_number(candidate.avg_net_ticks())} | "
-                f"{fmt_number(candidate.total_net_ticks())} | "
-                f"{fmt_number(candidate.profit_factor())} | "
-                f"{fmt_number(candidate.max_drawdown_ticks())} | "
-                f"{fmt_number(candidate.avg_mfe_ticks())} | "
-                f"{fmt_number(candidate.avg_mae_ticks())} |"
-            )
+        for reason, count in result.reason_counts.most_common():
+            lines.append(f"| {reason} | {count:,} |")
         return "\n".join(lines) + "\n"
 
 
-def run_backtest(config: BacktestConfig) -> BacktestReport:
+def evaluate_playbook(config: PlaybookConfig) -> PlaybookReport:
     rows = read_rows(config.path)
-    candidates = default_candidates(config)
-    results = [
-        evaluate_candidate(rows, candidate, config)
-        for candidate in candidates
-    ]
-    return BacktestReport(
+    result = evaluate_exhaustion_reversal(rows, config)
+    return PlaybookReport(
         path=config.path,
         rows=len(rows),
         horizon_seconds=config.horizon_seconds,
-        signal_window_seconds=config.signal_window_seconds,
         tick_size=config.tick_size,
         cost_ticks=config.cost_ticks,
         cooldown_seconds=config.cooldown_seconds,
-        candidates=results,
+        config=config,
+        result=result,
     )
 
 
-def read_rows(path: Path) -> list[dict[str, str]]:
-    with path.open(encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
-
-
-def default_candidates(config: BacktestConfig) -> list[Candidate]:
-    window = config.signal_window_seconds
-    return_col = f"return_{window}s"
-    imbalance_col = f"trade_type0_1_imbalance_{window}s"
-    spread_col = f"avg_spread_{window}s"
-
-    return [
-        Candidate(
-            name="random_baseline",
-            description="Stable pseudo-random long/short baseline by timestamp.",
-            signal=stable_random_signal,
-        ),
-        Candidate(
-            name=f"momentum_{window}s",
-            description=f"Follow positive/negative {window}s trailing return.",
-            signal=lambda row: thresholded_sign(
-                return_ticks(row, return_col, config.tick_size),
-                config.min_return_ticks,
-            ),
-        ),
-        Candidate(
-            name=f"mean_reversion_{window}s",
-            description=f"Fade positive/negative {window}s trailing return.",
-            signal=lambda row: -thresholded_sign(
-                return_ticks(row, return_col, config.tick_size),
-                config.min_return_ticks,
-            ),
-        ),
-        Candidate(
-            name=f"order_flow_follow_{window}s",
-            description=f"Follow trade imbalance over {window}s.",
-            signal=lambda row: thresholded_sign(
-                parse_float(row.get(imbalance_col)),
-                config.imbalance_threshold,
-            ),
-        ),
-        Candidate(
-            name=f"order_flow_fade_{window}s",
-            description=f"Fade trade imbalance over {window}s.",
-            signal=lambda row: -thresholded_sign(
-                parse_float(row.get(imbalance_col)),
-                config.imbalance_threshold,
-            ),
-        ),
-        Candidate(
-            name=f"spread_filtered_momentum_{window}s",
-            description=(
-                f"Follow {window}s momentum only when average spread is below "
-                f"{config.max_spread_ticks:g} ticks."
-            ),
-            signal=lambda row: (
-                thresholded_sign(
-                    return_ticks(row, return_col, config.tick_size),
-                    config.min_return_ticks,
-                )
-                if spread_ticks(row, spread_col, config.tick_size) <= config.max_spread_ticks
-                else 0
-            ),
-        ),
-    ]
-
-
-def evaluate_candidate(
+def evaluate_exhaustion_reversal(
     rows: list[dict[str, str]],
-    candidate: Candidate,
-    config: BacktestConfig,
-) -> CandidateBacktest:
+    config: PlaybookConfig,
+) -> PlaybookResult:
     trades: list[Trade] = []
+    reason_counts: Counter[str] = Counter()
     last_entry_timestamp = None
+
     for row in rows:
         timestamp = parse_dt(row.get("timestamp"))
+        decision = exhaustion_reversal_decision(row, config)
+        if decision.direction == 0:
+            reason_counts[decision.reason] += 1
+            continue
         if (
             config.cooldown_seconds > 0
             and timestamp is not None
             and last_entry_timestamp is not None
             and (timestamp - last_entry_timestamp).total_seconds() < config.cooldown_seconds
         ):
+            reason_counts["cooldown"] += 1
             continue
 
-        direction = candidate.signal(row)
-        if direction == 0:
-            continue
-        trade = build_trade(row, direction, config)
+        trade = build_trade(row, decision.direction, config)
         if trade is None:
+            reason_counts["missing_forward_label"] += 1
             continue
         trades.append(trade)
+        reason_counts["candidate"] += 1
         if timestamp is not None:
             last_entry_timestamp = timestamp
-    return CandidateBacktest(
-        name=candidate.name,
-        description=candidate.description,
+
+    return PlaybookResult(
+        name="exhaustion_reversal",
+        description=(
+            "Fade a fast directional impulse only after the short trigger window "
+            "starts pushing back with matching trade-flow pressure and a tight spread."
+        ),
         trades=trades,
+        reason_counts=reason_counts,
     )
+
+
+def exhaustion_reversal_decision(
+    row: dict[str, str],
+    config: PlaybookConfig,
+) -> SetupDecision:
+    impulse_ticks = return_ticks(
+        row,
+        f"return_{config.impulse_window_seconds}s",
+        config.tick_size,
+    )
+    trigger_ticks = return_ticks(
+        row,
+        f"return_{config.trigger_window_seconds}s",
+        config.tick_size,
+    )
+    flow_imbalance = parse_float(
+        row.get(f"trade_type0_1_imbalance_{config.trigger_window_seconds}s")
+    )
+    trigger_volume = parse_float(row.get(f"trade_volume_{config.trigger_window_seconds}s"))
+    spread_ticks = spread_ticks_from_row(
+        row,
+        f"avg_spread_{config.trigger_window_seconds}s",
+        config.tick_size,
+    )
+
+    if impulse_ticks is None:
+        return no_setup("missing_impulse")
+    if abs(impulse_ticks) < config.min_impulse_ticks:
+        return no_setup("impulse_too_small")
+    if trigger_ticks is None:
+        return no_setup("missing_trigger")
+
+    direction = -1 if impulse_ticks > 0 else 1
+    if trigger_ticks * direction < config.min_trigger_ticks:
+        return no_setup("trigger_not_reversing")
+    if flow_imbalance is None:
+        return no_setup("missing_flow")
+    if flow_imbalance * direction < config.min_flow_imbalance:
+        return no_setup("flow_not_confirming")
+    if trigger_volume is None:
+        return no_setup("missing_volume")
+    if trigger_volume < config.min_trigger_volume:
+        return no_setup("volume_too_low")
+    if spread_ticks is None:
+        return no_setup("missing_spread")
+    if spread_ticks > config.max_spread_ticks:
+        return no_setup("spread_too_wide")
+
+    return SetupDecision(
+        direction=direction,
+        reason="candidate",
+    )
+
+
+def no_setup(reason: str) -> SetupDecision:
+    return SetupDecision(direction=0, reason=reason)
 
 
 def build_trade(
     row: dict[str, str],
     direction: int,
-    config: BacktestConfig,
+    config: PlaybookConfig,
 ) -> Trade | None:
     mid_price = parse_float(row.get("mid_price"))
     forward_return = parse_float(row.get(f"forward_return_{config.horizon_seconds}s"))
@@ -337,7 +363,7 @@ def build_trade(
 def directional_excursions(
     row: dict[str, str],
     direction: int,
-    config: BacktestConfig,
+    config: PlaybookConfig,
 ) -> tuple[float | None, float | None]:
     raw_mfe = parse_float(row.get(f"forward_mfe_ticks_{config.horizon_seconds}s"))
     raw_mae = parse_float(row.get(f"forward_mae_ticks_{config.horizon_seconds}s"))
@@ -348,14 +374,9 @@ def directional_excursions(
     return max(-raw_mae, 0.0), min(-raw_mfe, 0.0)
 
 
-def thresholded_sign(value: float | None, threshold: float) -> int:
-    if value is None:
-        return 0
-    if value > threshold:
-        return 1
-    if value < -threshold:
-        return -1
-    return 0
+def read_rows(path: Path) -> list[dict[str, str]]:
+    with path.open(encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
 
 
 def return_ticks(row: dict[str, str], column: str, tick_size: float) -> float | None:
@@ -366,17 +387,11 @@ def return_ticks(row: dict[str, str], column: str, tick_size: float) -> float | 
     return value * mid_price / tick_size
 
 
-def spread_ticks(row: dict[str, str], column: str, tick_size: float) -> float:
+def spread_ticks_from_row(row: dict[str, str], column: str, tick_size: float) -> float | None:
     value = parse_float(row.get(column))
     if value is None or tick_size <= 0:
-        return math.inf
+        return None
     return value / tick_size
-
-
-def stable_random_signal(row: dict[str, str]) -> int:
-    key = row.get("timestamp") or row.get("mid_price") or ""
-    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=1).digest()
-    return 1 if digest[0] % 2 == 0 else -1
 
 
 def mean(values: list[float]) -> float | None:

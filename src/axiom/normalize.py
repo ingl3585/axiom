@@ -6,9 +6,14 @@ import csv
 import json
 from typing import Any, Iterable
 
-from .projectx import BarUnit, parse_utc_datetime
-from .qa import event_timestamp, fmt_dt, parse_dt
-from .storage import bars_csv_path, ensure_parent, safe_partition_value, write_bars_csv
+from .projectx import (
+    BarUnit,
+    compact_utc,
+    fmt_dt,
+    parse_dt,
+    parse_utc_datetime,
+    safe_partition_value,
+)
 
 
 @dataclass(frozen=True)
@@ -17,6 +22,45 @@ class NormalizedFile:
     source: Path
     path: Path
     rows: int
+
+
+def ensure_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def bars_csv_path(
+    data_dir: Path,
+    contract_id: str,
+    unit: BarUnit,
+    unit_number: int,
+    start: Any,
+    end: Any,
+) -> Path:
+    contract = safe_partition_value(contract_id)
+    unit_name = unit.name.lower()
+    return (
+        data_dir
+        / "bronze"
+        / "projectx"
+        / "bars"
+        / f"contract={contract}"
+        / f"unit={unit_name}_{unit_number}"
+        / f"{compact_utc(start)}_{compact_utc(end)}.csv"
+    )
+
+
+def write_bars_csv(path: Path, bars: list[dict[str, Any]]) -> Path:
+    ensure_parent(path)
+    fieldnames = ["t", "o", "h", "l", "c", "v"]
+    unique = {str(row.get("t")): row for row in bars if row.get("t")}
+    ordered = [unique[key] for key in sorted(unique)]
+
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in ordered:
+            writer.writerow({name: row.get(name) for name in fieldnames})
+    return path
 
 
 def normalize_bars_history_json(raw_path: Path, data_dir: Path) -> NormalizedFile:
@@ -92,6 +136,16 @@ def iter_realtime_rows(source: Path, name: str) -> Iterable[dict[str, Any]]:
                     yield normalize_trade_row(base, record)
                 elif name == "depth":
                     yield normalize_depth_row(base, record)
+
+
+def raw_event_timestamp(name: str, record: dict[str, Any]) -> str:
+    if name == "quotes":
+        return str(record.get("lastUpdated") or record.get("timestamp") or "")
+    return str(record.get("timestamp") or record.get("lastUpdated") or "")
+
+
+def event_timestamp(name: str, record: dict[str, Any]) -> Any:
+    return parse_dt(raw_event_timestamp(name, record))
 
 
 def base_event_row(
@@ -273,11 +327,3 @@ def append_manifest(data_dir: Path, files: list[NormalizedFile]) -> Path:
             )
             handle.write("\n")
     return path
-
-
-def contract_from_partition(path: Path) -> str:
-    contract_part = next(
-        (part for part in path.parts if part.startswith("contract=")),
-        "contract=unknown",
-    )
-    return safe_partition_value(contract_part.split("=", 1)[1])

@@ -3,20 +3,26 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import unittest
 
-from axiom.projectx import BarUnit, history_windows, parse_bar_unit, parse_utc_datetime
-from axiom.storage import safe_partition_value
+import _bootstrap  # noqa: F401
+from axiom.projectx import (
+    BarUnit,
+    history_windows,
+    parse_dt,
+    parse_utc_datetime,
+    safe_partition_value,
+)
 
 
 class ProjectXTimeTests(unittest.TestCase):
-    def test_parse_bar_unit_aliases(self) -> None:
-        self.assertEqual(parse_bar_unit("minute"), BarUnit.MINUTE)
-        self.assertEqual(parse_bar_unit("2"), BarUnit.MINUTE)
-        self.assertEqual(parse_bar_unit(1), BarUnit.SECOND)
-
     def test_parse_utc_datetime_accepts_z(self) -> None:
         parsed = parse_utc_datetime("2026-06-03T14:30:00Z")
         self.assertEqual(parsed.tzinfo, UTC)
         self.assertEqual(parsed.hour, 14)
+
+    def test_parse_dt_trims_projectx_fractional_precision(self) -> None:
+        parsed = parse_dt("2026-06-03T20:56:00.6756059+00:00")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.microsecond, 675605)
 
     def test_history_windows_chunk_by_bar_limit(self) -> None:
         start = datetime(2026, 6, 1, tzinfo=UTC)
@@ -32,4 +38,3 @@ class ProjectXTimeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

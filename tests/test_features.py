@@ -5,6 +5,7 @@ import csv
 import tempfile
 import unittest
 
+import _bootstrap  # noqa: F401
 from axiom.features import IntradayFeatureConfig, build_intraday_features
 
 

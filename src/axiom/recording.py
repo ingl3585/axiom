@@ -14,15 +14,8 @@ class RecordingConfig:
     data_dir: Path = Path("data")
     duration_seconds: int | None = None
     live_features: bool = True
-    live_signals: bool = True
     feature_windows: str = "1,5,30,60"
     feature_interval_seconds: int = 1
-    signal_window_seconds: int = 5
-    signal_cooldown_seconds: int = 30
-    signal_min_momentum_ticks: float = 0.0
-    signal_max_spread_ticks: float = 4.0
-    signal_max_stale_quote_seconds: float = 5.0
-    signal_tick_size: float = 0.25
 
 
 def find_node_executable() -> str:
@@ -73,21 +66,8 @@ def run_realtime_recorder(config: RecordingConfig) -> int:
         command.append("--live-features")
     else:
         command.append("--no-live-features")
-    if config.live_signals:
-        command.append("--live-signals")
-    else:
-        command.append("--no-live-signals")
     command.extend(["--feature-windows", config.feature_windows])
     command.extend(["--feature-interval-seconds", str(config.feature_interval_seconds)])
-    command.extend(["--signal-window-seconds", str(config.signal_window_seconds)])
-    command.extend(["--signal-cooldown-seconds", str(config.signal_cooldown_seconds)])
-    command.extend(["--signal-min-momentum-ticks", str(config.signal_min_momentum_ticks)])
-    command.extend(["--signal-max-spread-ticks", str(config.signal_max_spread_ticks)])
-    command.extend([
-        "--signal-max-stale-quote-seconds",
-        str(config.signal_max_stale_quote_seconds),
-    ])
-    command.extend(["--signal-tick-size", str(config.signal_tick_size)])
 
     try:
         return subprocess.run(command, check=False).returncode

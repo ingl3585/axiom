@@ -7,8 +7,7 @@ import csv
 import math
 from typing import Any
 
-from .qa import find_latest_file, fmt_dt, parse_dt
-from .storage import ensure_parent
+from .projectx import fmt_dt, parse_dt
 
 
 DEFAULT_WINDOWS = [1, 5, 30, 60]
@@ -35,12 +34,23 @@ class IntradayFeatureConfig:
     tick_size: float = 0.25
 
 
+def find_latest_file(root: Path, pattern: str) -> Path | None:
+    files = [path for path in root.rglob(pattern) if path.is_file()] if root.exists() else []
+    if not files:
+        return None
+    return max(files, key=lambda path: path.stat().st_mtime)
+
+
+def ensure_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
 def build_intraday_features(config: IntradayFeatureConfig) -> FeatureBuildResult:
     quote_path = config.quote_path or find_latest_file(
         config.data_dir / "bronze" / "projectx" / "quotes", "quotes.csv"
     )
     if quote_path is None:
-        raise ValueError("No bronze quote CSV found. Run `main.py normalize realtime` first.")
+        raise ValueError("No bronze quote CSV found. Run `python .\\main.py` first.")
 
     date_part, contract_part = date_contract_partitions(quote_path)
     trade_path = sibling_bronze_path(config.data_dir, "trades", date_part, contract_part)

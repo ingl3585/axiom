@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import IntEnum
 import json
+import re
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -20,24 +21,6 @@ class BarUnit(IntEnum):
     DAY = 4
     WEEK = 5
     MONTH = 6
-
-
-BAR_UNIT_ALIASES = {
-    "second": BarUnit.SECOND,
-    "seconds": BarUnit.SECOND,
-    "sec": BarUnit.SECOND,
-    "minute": BarUnit.MINUTE,
-    "minutes": BarUnit.MINUTE,
-    "min": BarUnit.MINUTE,
-    "hour": BarUnit.HOUR,
-    "hours": BarUnit.HOUR,
-    "day": BarUnit.DAY,
-    "days": BarUnit.DAY,
-    "week": BarUnit.WEEK,
-    "weeks": BarUnit.WEEK,
-    "month": BarUnit.MONTH,
-    "months": BarUnit.MONTH,
-}
 
 
 @dataclass(frozen=True)
@@ -63,20 +46,6 @@ class Contract:
         )
 
 
-def parse_bar_unit(value: str | int | BarUnit) -> BarUnit:
-    if isinstance(value, BarUnit):
-        return value
-    if isinstance(value, int):
-        return BarUnit(value)
-    normalized = value.strip().lower()
-    if normalized.isdigit():
-        return BarUnit(int(normalized))
-    try:
-        return BAR_UNIT_ALIASES[normalized]
-    except KeyError as exc:
-        raise ValueError(f"Unsupported bar unit: {value}") from exc
-
-
 def parse_utc_datetime(value: str | datetime) -> datetime:
     if isinstance(value, datetime):
         parsed = value
@@ -91,12 +60,50 @@ def parse_utc_datetime(value: str | datetime) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = value.strip()
+    if not text or text.startswith("0001-01-01"):
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+
+    # Project X sometimes emits 7 fractional digits. Python accepts 6.
+    if "." in text:
+        prefix, suffix = text.split(".", 1)
+        offset = ""
+        fraction = suffix
+        for marker in ("+", "-"):
+            if marker in suffix:
+                fraction, offset = suffix.split(marker, 1)
+                offset = marker + offset
+                break
+        if len(fraction) > 6:
+            text = f"{prefix}.{fraction[:6]}{offset}"
+
+    try:
+        return parse_utc_datetime(text)
+    except ValueError:
+        return None
+
+
 def iso_utc(value: datetime) -> str:
     return parse_utc_datetime(value).isoformat().replace("+00:00", "Z")
 
 
+def fmt_dt(value: datetime | None) -> str:
+    if value is None:
+        return "n/a"
+    return iso_utc(value)
+
+
 def compact_utc(value: datetime) -> str:
     return parse_utc_datetime(value).strftime("%Y%m%dT%H%M%SZ")
+
+
+def safe_partition_value(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", value).strip("_")
 
 
 def unit_seconds(unit: BarUnit, unit_number: int) -> int:
@@ -171,10 +178,6 @@ class ProjectXClient:
             "/api/Contract/search",
             {"searchText": search_text, "live": live},
         )
-        return [Contract.from_payload(item) for item in payload.get("contracts", [])]
-
-    def available_contracts(self, live: bool = False) -> list[Contract]:
-        payload = self._post("/api/Contract/available", {"live": live})
         return [Contract.from_payload(item) for item in payload.get("contracts", [])]
 
     def retrieve_bars(
@@ -272,4 +275,3 @@ class ProjectXClient:
                 f"{parsed.get('errorMessage')}"
             )
         return parsed
-

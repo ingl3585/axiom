@@ -10,11 +10,12 @@ from .projectx import (
     BarUnit,
     Contract,
     ProjectXClient,
+    compact_utc,
     iso_utc,
     parse_utc_datetime,
+    safe_partition_value,
     unit_seconds,
 )
-from .storage import history_raw_path, safe_partition_value, write_json
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,33 @@ class HistoryBackfillResult:
 
 def history_state_path(data_dir: Path) -> Path:
     return data_dir / "state" / "history_state.json"
+
+
+def write_json(path: Path, payload: Any) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def history_raw_path(
+    data_dir: Path,
+    contract_id: str,
+    unit: BarUnit,
+    unit_number: int,
+    start: datetime,
+    end: datetime,
+) -> Path:
+    contract = safe_partition_value(contract_id)
+    unit_name = unit.name.lower()
+    return (
+        data_dir
+        / "raw"
+        / "projectx"
+        / "history"
+        / f"contract={contract}"
+        / f"unit={unit_name}_{unit_number}"
+        / f"{compact_utc(start)}_{compact_utc(end)}.json"
+    )
 
 
 def load_history_state(data_dir: Path) -> dict[str, Any]:

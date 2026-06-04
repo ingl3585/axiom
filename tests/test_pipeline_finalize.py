@@ -7,10 +7,11 @@ import io
 import tempfile
 import unittest
 
-from axiom.cli import finalize_realtime_capture
+import _bootstrap  # noqa: F401
+from axiom.pipeline import finalize_realtime_capture
 
 
-class CliFinalizeTests(unittest.TestCase):
+class PipelineFinalizeTests(unittest.TestCase):
     def test_finalize_realtime_capture_refreshes_bronze_and_silver(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory) / "data"

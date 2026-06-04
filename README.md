@@ -229,6 +229,14 @@ Run baseline candidate-rule backtests against the latest silver feature table:
 
 This is a research harness, not an execution simulator. It scores deterministic baselines such as random long/short, momentum, mean reversion, order-flow follow/fade, and spread-filtered momentum after configurable tick costs. Reports are written to `data/reports/research/`.
 
+Evaluate logged live candidate signals against finalized feature labels:
+
+```powershell
+.\.venv\Scripts\python.exe main.py research signals
+```
+
+This grades `LONG_CANDIDATE` / `SHORT_CANDIDATE` rows from `data/live/projectx/signals/` using the latest silver feature labels and reports candidate counts, NO_TRADE reasons, win rate, net ticks, MFE/MAE, and unmatched candidates.
+
 ## Data Layout
 
 ```text

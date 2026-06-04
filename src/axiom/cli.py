@@ -36,6 +36,7 @@ from .qa import (
 )
 from .recording import RecordingConfig, run_realtime_recorder
 from .research import analyze_feature_ic
+from .signal_eval import SignalEvaluationConfig, evaluate_signal_file
 from .session import analyze_session
 from .storage import bars_csv_path, history_raw_path, write_bars_csv, write_json
 
@@ -261,6 +262,19 @@ def build_parser() -> ArgumentParser:
     backtest.add_argument("--json", action="store_true", help="Print JSON instead of Markdown")
     backtest.add_argument("--no-write", action="store_true", help="Do not write report files")
     backtest.set_defaults(handler=cmd_research_backtest)
+
+    signals = research_subparsers.add_parser(
+        "signals", help="Evaluate logged live candidate signals against feature labels"
+    )
+    signals.add_argument("--signal-path", help="Specific live signals JSONL path")
+    signals.add_argument("--feature-path", help="Specific silver features CSV path")
+    signals.add_argument("--horizon-seconds", type=int, default=30)
+    signals.add_argument("--tick-size", type=float, default=0.25)
+    signals.add_argument("--cost-ticks", type=float, default=2.0)
+    signals.add_argument("--max-match-lag-seconds", type=float, default=1.5)
+    signals.add_argument("--json", action="store_true", help="Print JSON instead of Markdown")
+    signals.add_argument("--no-write", action="store_true", help="Do not write report files")
+    signals.set_defaults(handler=cmd_research_signals)
 
     return parser
 
@@ -882,6 +896,51 @@ def cmd_research_backtest(args: Namespace) -> int:
 
     if not args.no_write:
         stem = f"backtest_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
+        md_path, json_path = write_report_pair(
+            settings.data_dir / "reports" / "research",
+            stem,
+            report.to_markdown(),
+            report.to_dict(),
+        )
+        print(f"Saved reports: {md_path}, {json_path}")
+    return 0
+
+
+def cmd_research_signals(args: Namespace) -> int:
+    settings = Settings.from_env()
+    signal_path = Path(args.signal_path) if args.signal_path else find_latest_file(
+        settings.data_dir / "live" / "projectx" / "signals", "signals.jsonl"
+    )
+    if signal_path is None:
+        raise ValueError(
+            "No live signal JSONL found. Run `axiom record` or pass --signal-path."
+        )
+
+    feature_path = Path(args.feature_path) if args.feature_path else find_latest_file(
+        settings.data_dir / "silver" / "projectx" / "features", "*.csv"
+    )
+    if feature_path is None:
+        raise ValueError(
+            "No silver features CSV found. Run `axiom features intraday` or pass --feature-path."
+        )
+
+    report = evaluate_signal_file(
+        SignalEvaluationConfig(
+            signal_path=signal_path,
+            feature_path=feature_path,
+            horizon_seconds=args.horizon_seconds,
+            tick_size=args.tick_size,
+            cost_ticks=args.cost_ticks,
+            max_match_lag_seconds=args.max_match_lag_seconds,
+        )
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.to_markdown())
+
+    if not args.no_write:
+        stem = f"signals_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
         md_path, json_path = write_report_pair(
             settings.data_dir / "reports" / "research",
             stem,

@@ -42,7 +42,7 @@ def find_node_executable() -> str:
 
 
 def recorder_script_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "scripts" / "projectx_realtime.mjs"
+    return Path(__file__).resolve().parents[1] / "scripts" / "projectx_realtime.mjs"
 
 
 def run_realtime_recorder(config: RecordingConfig) -> int:

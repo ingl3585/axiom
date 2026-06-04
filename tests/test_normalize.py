@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 import _bootstrap  # noqa: F401
-from axiom.normalize import normalize_bars_history_json, normalize_realtime_dir
+from normalize import normalize_bars_history_json, normalize_realtime_dir
 
 
 class NormalizeTests(unittest.TestCase):

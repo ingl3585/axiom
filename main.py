@@ -12,17 +12,14 @@ if str(SRC) not in sys.path:
 
 
 def run() -> int:
-    from axiom.pipeline import run_pipeline, run_research
-    from axiom.projectx import ProjectXError
+    from pipeline import run_pipeline
+    from projectx import ProjectXError
 
     try:
-        args = sys.argv[1:]
-        if not args:
-            return run_pipeline()
-        if args == ["research"]:
-            return run_research()
-        print("Use `python .\\main.py` or `python .\\main.py research`.", file=sys.stderr)
-        return 2
+        if sys.argv[1:]:
+            print("Usage: python .\\main.py (no arguments).", file=sys.stderr)
+            return 2
+        return run_pipeline()
     except (ProjectXError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

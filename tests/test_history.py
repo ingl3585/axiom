@@ -7,8 +7,8 @@ import tempfile
 import unittest
 
 import _bootstrap  # noqa: F401
-from axiom.history import backfill_historical_bars, load_history_state
-from axiom.projectx import BarUnit, Contract
+from history import backfill_historical_bars, load_history_state
+from projectx import BarUnit, Contract
 
 
 class FakeHistoryClient:

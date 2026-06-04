@@ -2,16 +2,13 @@
 
 Axiom is a data-first MNQ research and live-market recording project for the Project X / TopstepX API.
 
-The project has two normal ways to run `main.py`:
+Run the operational pipeline with:
 
 ```powershell
 python .\main.py
-python .\main.py research
 ```
 
-`python .\main.py` runs the operational pipeline. It authenticates with Project X, backfills missing MNQ historical bars, normalizes raw data, builds feature tables, then records live quote/trade/depth data until you press `Ctrl+C`. When recording stops, it finalizes the latest capture.
-
-`python .\main.py research` evaluates the current signal playbook against the latest silver feature table. This is research only; Axiom does not send orders.
+`python .\main.py` authenticates with Project X, backfills missing MNQ historical bars, normalizes raw data, builds feature tables, then records live quote/trade/depth data until you press `Ctrl+C`. When recording stops, it finalizes the latest capture.
 
 ## Setup
 
@@ -63,16 +60,6 @@ The main run uses these defaults:
 
 The recorder keeps running until you press `Ctrl+C`.
 
-## Research
-
-```powershell
-python .\main.py research
-```
-
-The current playbook is `exhaustion_reversal`: fade a fast 30-second directional impulse only after the 5-second trigger window pushes back with matching trade-flow pressure, enough volume, and a tight spread.
-
-Reports are written to `data/reports/research/` as Markdown and JSON.
-
 ## Data Layout
 
 ```text
@@ -82,7 +69,6 @@ data/
   bronze/projectx/            normalized CSV tables
   silver/projectx/features/   model/research-ready feature tables
   live/projectx/features/     rolling live feature snapshots
-  reports/research/           playbook evaluation reports
   state/history_state.json    historical backfill resume state
 ```
 
@@ -90,4 +76,4 @@ Raw files are the audit trail. Bronze files are cleaned enough for analysis. Sil
 
 ## Current Scope
 
-Axiom currently records and evaluates. It does not place trades. The next execution step should be paper/practice-account order plumbing behind explicit risk controls.
+Axiom currently ingests, cleans, and builds features from Project X market data, and records live market data. It does not generate trade signals or place trades yet. The next steps are signal generation, then paper/practice-account order execution behind explicit risk controls.

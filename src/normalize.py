@@ -6,7 +6,7 @@ import csv
 import json
 from typing import Any, Iterable
 
-from .projectx import (
+from projectx import (
     BarUnit,
     compact_utc,
     fmt_dt,

@@ -1,24 +1,20 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
-import json
 import sys
-from typing import Any
 
-from .config import Settings
-from .features import IntradayFeatureConfig, build_intraday_features
-from .history import HistoryBackfillResult, backfill_historical_bars
-from .normalize import append_manifest, normalize_history_dir, normalize_realtime_dir
-from .playbook import PlaybookConfig, evaluate_playbook
-from .projectx import (
+from config import Settings
+from features import IntradayFeatureConfig, build_intraday_features
+from history import HistoryBackfillResult, backfill_historical_bars
+from normalize import append_manifest, normalize_history_dir, normalize_realtime_dir
+from projectx import (
     BarUnit,
     Contract,
     ProjectXClient,
     ProjectXError,
     compact_utc,
 )
-from .recording import RecordingConfig, run_realtime_recorder
+from recording import RecordingConfig, run_realtime_recorder
 
 DEFAULT_SYMBOL = "MNQ"
 DEFAULT_HISTORY_DAYS = 30
@@ -70,68 +66,12 @@ def run_pipeline() -> int:
     return 0
 
 
-def run_research() -> int:
-    settings = Settings.from_env()
-    path = find_latest_file(settings.data_dir / "silver" / "projectx" / "features", "*.csv")
-    if path is None:
-        raise ValueError("No silver features CSV found. Run `python .\\main.py` first.")
-
-    report = evaluate_playbook(
-        PlaybookConfig(
-            path=path,
-            horizon_seconds=30,
-            tick_size=DEFAULT_TICK_SIZE,
-            cost_ticks=2.0,
-            cooldown_seconds=30,
-            impulse_window_seconds=30,
-            trigger_window_seconds=5,
-            min_impulse_ticks=12.0,
-            min_trigger_ticks=2.0,
-            min_flow_imbalance=0.20,
-            min_trigger_volume=20.0,
-            max_spread_ticks=2.0,
-        )
-    )
-    print(report.to_markdown())
-
-    stem = f"playbook_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
-    md_path, json_path = write_report_pair(
-        settings.data_dir / "reports" / "research",
-        stem,
-        report.to_markdown(),
-        report.to_dict(),
-    )
-    print(f"Saved reports: {md_path}, {json_path}")
-    return 0
-
-
-def find_latest_file(root: Path, pattern: str) -> Path | None:
-    files = [path for path in root.rglob(pattern) if path.is_file()] if root.exists() else []
-    if not files:
-        return None
-    return max(files, key=lambda path: path.stat().st_mtime)
-
-
 def find_latest_realtime_dir(data_dir: Path) -> Path | None:
     realtime_root = data_dir / "raw" / "projectx" / "realtime"
     dirs = [path for path in realtime_root.rglob("contract=*") if path.is_dir()]
     if not dirs:
         return None
     return max(dirs, key=lambda path: path.stat().st_mtime)
-
-
-def write_report_pair(
-    report_dir: Path,
-    stem: str,
-    markdown: str,
-    payload: dict[str, Any],
-) -> tuple[Path, Path]:
-    report_dir.mkdir(parents=True, exist_ok=True)
-    md_path = report_dir / f"{stem}.md"
-    json_path = report_dir / f"{stem}.json"
-    md_path.write_text(markdown, encoding="utf-8")
-    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    return md_path, json_path
 
 
 def authenticated_client(settings: Settings) -> ProjectXClient:

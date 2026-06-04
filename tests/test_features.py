@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 import _bootstrap  # noqa: F401
-from axiom.features import IntradayFeatureConfig, build_intraday_features
+from features import IntradayFeatureConfig, build_intraday_features
 
 
 class FeatureTests(unittest.TestCase):

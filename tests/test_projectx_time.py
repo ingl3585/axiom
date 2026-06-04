@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import unittest
 
 import _bootstrap  # noqa: F401
-from axiom.projectx import (
+from projectx import (
     BarUnit,
     history_windows,
     parse_dt,

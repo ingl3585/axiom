@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 import _bootstrap  # noqa: F401
-from axiom.pipeline import finalize_realtime_capture
+from pipeline import finalize_realtime_capture
 
 
 class PipelineFinalizeTests(unittest.TestCase):

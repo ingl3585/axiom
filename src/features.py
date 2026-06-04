@@ -7,7 +7,7 @@ import csv
 import math
 from typing import Any
 
-from .projectx import fmt_dt, parse_dt
+from projectx import fmt_dt, parse_dt
 
 
 DEFAULT_WINDOWS = [1, 5, 30, 60]

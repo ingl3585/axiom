@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import insort
 from dataclasses import dataclass
 from pathlib import Path
 import csv
@@ -12,6 +13,15 @@ from bars import parse_float
 DEFAULT_HORIZON_BARS = 5
 DEFAULT_TICK_SIZE = 0.25
 SUMMARY_LIMIT = 15
+
+# Volatility states use expanding quantiles of *prior* rows only (no lookahead).
+# Until this many observations exist, rows classify as vol_normal.
+MIN_THRESHOLD_OBSERVATIONS = 200
+
+# Best/worst leaderboards only consider states with at least this many rows.
+# Sorting thousands of tiny states by avg forward return guarantees the top of
+# the list is selection-bias flukes, not signal.
+DEFAULT_LEADERBOARD_MIN_COUNT = 100
 
 STATE_DIMENSIONS = [
     "session_state",
@@ -32,6 +42,7 @@ class StateProfileConfig:
     horizon_bars: int = DEFAULT_HORIZON_BARS
     tick_size: float = DEFAULT_TICK_SIZE
     min_count: int = 3
+    leaderboard_min_count: int = DEFAULT_LEADERBOARD_MIN_COUNT
 
 
 @dataclass(frozen=True)
@@ -104,6 +115,7 @@ class SummaryStats:
     count: int = 0
     wins: int = 0
     sum_forward_ticks: float = 0.0
+    sum_sq_forward_ticks: float = 0.0
     sum_mfe_ticks: float = 0.0
     sum_mae_ticks: float = 0.0
 
@@ -111,15 +123,29 @@ class SummaryStats:
         self.count += 1
         self.wins += 1 if outcome.forward_ticks > 0 else 0
         self.sum_forward_ticks += outcome.forward_ticks
+        self.sum_sq_forward_ticks += outcome.forward_ticks * outcome.forward_ticks
         self.sum_mfe_ticks += outcome.mfe_ticks
         self.sum_mae_ticks += outcome.mae_ticks
 
     def to_dict(self, name: str) -> dict[str, Any]:
+        avg = self.sum_forward_ticks / self.count if self.count else None
+        std_error = None
+        if self.count >= 2 and avg is not None:
+            variance = max(
+                0.0,
+                self.sum_sq_forward_ticks / self.count - avg * avg,
+            )
+            std_error = math.sqrt(variance) / math.sqrt(self.count)
         return {
             "name": name,
             "count": self.count,
             "win_rate": self.wins / self.count if self.count else None,
-            "avg_forward_ticks": self.sum_forward_ticks / self.count if self.count else None,
+            "avg_forward_ticks": avg,
+            # 2-standard-error bounds. Overlapping forward windows mean rows are
+            # autocorrelated, so even these bounds are optimistic; treat them as
+            # a ranking aid, not significance.
+            "lcb_forward_ticks": avg - 2 * std_error if std_error is not None else None,
+            "ucb_forward_ticks": avg + 2 * std_error if std_error is not None else None,
             "avg_mfe_ticks": self.sum_mfe_ticks / self.count if self.count else None,
             "avg_mae_ticks": self.sum_mae_ticks / self.count if self.count else None,
         }
@@ -132,8 +158,8 @@ def build_state_profile(config: StateProfileConfig) -> StateProfileResult:
         raise ValueError("tick_size must be positive")
 
     rows = read_rows(config.feature_path)
-    thresholds = profile_thresholds(rows)
-    profiled_rows = profile_rows(rows, thresholds, config.horizon_bars, config.tick_size)
+    final_thresholds = profile_thresholds(rows)
+    profiled_rows = profile_rows(rows, config.horizon_bars, config.tick_size)
 
     output_dir = state_profile_dir(config.data_dir, config.feature_path)
     rows_path = output_dir / "states.csv"
@@ -145,9 +171,10 @@ def build_state_profile(config: StateProfileConfig) -> StateProfileResult:
         feature_path=config.feature_path,
         rows_path=rows_path,
         rows=profiled_rows,
-        thresholds=thresholds,
+        thresholds=final_thresholds,
         horizon_bars=config.horizon_bars,
         min_count=config.min_count,
+        leaderboard_min_count=config.leaderboard_min_count,
     )
     write_json(json_path, payload)
     markdown_path.write_text(profile_markdown(payload), encoding="utf-8")
@@ -165,13 +192,13 @@ def build_state_profile(config: StateProfileConfig) -> StateProfileResult:
 
 def profile_rows(
     rows: list[dict[str, str]],
-    thresholds: ProfileThresholds,
     horizon_bars: int,
     tick_size: float,
 ) -> list[dict[str, Any]]:
+    thresholds_by_row = causal_thresholds(rows)
     profiled: list[dict[str, Any]] = []
     for index, row in enumerate(rows):
-        state = classify_market_state(row, thresholds)
+        state = classify_market_state(row, thresholds_by_row[index])
         outcome = forward_outcome(rows, index, horizon_bars, tick_size)
         output: dict[str, Any] = {
             "t": row.get("t", ""),
@@ -342,6 +369,31 @@ def profile_thresholds(rows: list[dict[str, str]]) -> ProfileThresholds:
     )
 
 
+def causal_thresholds(rows: list[dict[str, str]]) -> list[ProfileThresholds]:
+    """Per-row volatility thresholds computed from strictly prior rows.
+
+    Expanding 33/67% quantiles over the volatility seen so far, so a row is
+    never classified using knowledge of the future distribution. Rows before the
+    warmup get (None, None), which classifies as vol_normal.
+    """
+    observed: list[float] = []
+    out: list[ProfileThresholds] = []
+    for row in rows:
+        if len(observed) >= MIN_THRESHOLD_OBSERVATIONS:
+            out.append(
+                ProfileThresholds(
+                    volatility_low=quantile_sorted(observed, 0.33),
+                    volatility_high=quantile_sorted(observed, 0.67),
+                )
+            )
+        else:
+            out.append(ProfileThresholds(None, None))
+        value = parse_float(row.get("vol_20bar"))
+        if value is not None:
+            insort(observed, value)
+    return out
+
+
 def profile_payload(
     *,
     feature_path: Path,
@@ -350,6 +402,7 @@ def profile_payload(
     thresholds: ProfileThresholds,
     horizon_bars: int,
     min_count: int,
+    leaderboard_min_count: int = DEFAULT_LEADERBOARD_MIN_COUNT,
 ) -> dict[str, Any]:
     state_summaries = summarize(rows, "state_key", min_count)
     dimension_summaries = {
@@ -362,6 +415,9 @@ def profile_payload(
         "rows": len(rows),
         "labeled_rows": sum(1 for row in rows if row.get("has_forward_outcome") == "1"),
         "horizon_bars": horizon_bars,
+        "leaderboard_min_count": leaderboard_min_count,
+        # End-of-data thresholds, for reference. Classification itself uses
+        # causal (expanding, prior-rows-only) thresholds per row.
         "thresholds": {
             "volatility_low": thresholds.volatility_low,
             "volatility_high": thresholds.volatility_high,
@@ -409,14 +465,22 @@ def outcome_from_profiled_row(row: dict[str, Any]) -> ForwardOutcome | None:
 
 def profile_markdown(payload: dict[str, Any]) -> str:
     state_summaries = payload["state_summaries"]
+    leaderboard_min = int(payload.get("leaderboard_min_count", DEFAULT_LEADERBOARD_MIN_COUNT))
+    eligible = [item for item in state_summaries if item["count"] >= leaderboard_min]
+    # Rank by confidence bounds, not raw averages: strongest by the lower bound
+    # (must be good even pessimistically), weakest by the upper bound.
     best = sorted(
-        state_summaries,
-        key=lambda item: item["avg_forward_ticks"] if item["avg_forward_ticks"] is not None else -math.inf,
+        eligible,
+        key=lambda item: item["lcb_forward_ticks"]
+        if item.get("lcb_forward_ticks") is not None
+        else -math.inf,
         reverse=True,
     )[:SUMMARY_LIMIT]
     worst = sorted(
-        state_summaries,
-        key=lambda item: item["avg_forward_ticks"] if item["avg_forward_ticks"] is not None else math.inf,
+        eligible,
+        key=lambda item: item["ucb_forward_ticks"]
+        if item.get("ucb_forward_ticks") is not None
+        else math.inf,
     )[:SUMMARY_LIMIT]
 
     lines = [
@@ -427,31 +491,47 @@ def profile_markdown(payload: dict[str, Any]) -> str:
         f"- Rows: {payload['rows']:,}",
         f"- Labeled rows: {payload['labeled_rows']:,}",
         f"- Forward horizon: {payload['horizon_bars']:,} bars",
+        f"- Leaderboard minimum rows per state: {leaderboard_min:,}",
+        "",
+        "## How To Read This",
+        "",
+        (
+            "Forward windows overlap, so adjacent rows are autocorrelated and "
+            "every win rate and confidence bound here is optimistic. A round "
+            "trip costs roughly 2 ticks. Leaderboards exclude states with fewer "
+            f"than {leaderboard_min:,} rows and rank by 2-standard-error "
+            "confidence bounds rather than raw averages; the per-dimension "
+            "tables in `summary.json` carry the largest samples and are the "
+            "most reliable place to look first. Treat everything as hypothesis "
+            "ranking, not proof."
+        ),
         "",
         "## Most Common States",
         "",
     ]
     lines.extend(summary_table(state_summaries[:SUMMARY_LIMIT]))
-    lines.extend(["", "## Strongest Forward States", ""])
+    lines.extend(["", "## Strongest Forward States (by lower confidence bound)", ""])
     lines.extend(summary_table(best))
-    lines.extend(["", "## Weakest Forward States", ""])
+    lines.extend(["", "## Weakest Forward States (by upper confidence bound)", ""])
     lines.extend(summary_table(worst))
     return "\n".join(lines) + "\n"
 
 
 def summary_table(rows: list[dict[str, Any]]) -> list[str]:
     lines = [
-        "| state | rows | win % | avg fwd | avg mfe | avg mae |",
-        "| --- | ---: | ---: | ---: | ---: | ---: |",
+        "| state | rows | win % | avg fwd | fwd 2se bounds | avg mfe | avg mae |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     if not rows:
-        lines.append("| n/a | 0 | n/a | n/a | n/a | n/a |")
+        lines.append("| n/a | 0 | n/a | n/a | n/a | n/a | n/a |")
         return lines
     for row in rows:
         lines.append(
             f"| `{row['name']}` | {row['count']:,} | "
             f"{fmt_percent(row['win_rate'])} | "
             f"{fmt_number(row['avg_forward_ticks'])} | "
+            f"{fmt_number(row.get('lcb_forward_ticks'))} to "
+            f"{fmt_number(row.get('ucb_forward_ticks'))} | "
             f"{fmt_number(row['avg_mfe_ticks'])} | "
             f"{fmt_number(row['avg_mae_ticks'])} |"
         )
@@ -508,9 +588,12 @@ def write_json(path: Path, payload: dict[str, Any]) -> Path:
 
 
 def quantile(values: list[float], q: float) -> float | None:
-    if not values:
+    return quantile_sorted(sorted(values), q)
+
+
+def quantile_sorted(ordered: list[float], q: float) -> float | None:
+    if not ordered:
         return None
-    ordered = sorted(values)
     position = (len(ordered) - 1) * q
     lower = math.floor(position)
     upper = math.ceil(position)

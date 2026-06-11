@@ -45,7 +45,17 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(session_bucket(utc(2026, 7, 1, 16, 30)), "lunch")      # 12:30
         self.assertEqual(session_bucket(utc(2026, 7, 1, 19, 30)), "close_hour") # 15:30
         self.assertEqual(session_bucket(utc(2026, 7, 1, 2, 0)), "overnight")    # 22:00 prior
-        self.assertEqual(session_bucket(utc(2026, 7, 4, 18, 0)), "weekend")     # Saturday
+        self.assertEqual(session_bucket(utc(2026, 7, 4, 18, 0)), "closed")      # Saturday
+
+    def test_globex_calendar_edges(self) -> None:
+        # Sunday 2026-07-05: before the 18:00 ET open is closed, after is trading.
+        self.assertEqual(session_bucket(utc(2026, 7, 5, 12, 0)), "closed")      # Sun 08:00 ET
+        self.assertEqual(session_bucket(utc(2026, 7, 5, 22, 0)), "overnight")   # Sun 18:00 ET
+        # Friday 2026-07-03 after 17:00 ET the market is closed for the weekend.
+        self.assertEqual(session_bucket(utc(2026, 7, 3, 21, 30)), "closed")     # Fri 17:30 ET
+        # Monday-Thursday 17:00-18:00 ET is the daily maintenance break.
+        self.assertEqual(session_bucket(utc(2026, 7, 1, 21, 30)), "closed")     # Wed 17:30 ET
+        self.assertEqual(session_bucket(utc(2026, 7, 1, 22, 0)), "overnight")   # Wed 18:00 ET
 
     def test_session_day_anchors_at_cash_open(self) -> None:
         # 12:00 UTC July = 08:00 ET (pre-open) -> rolls into prior session day.

@@ -16,8 +16,13 @@ def run() -> int:
     from projectx import ProjectXError
 
     try:
-        if sys.argv[1:]:
-            print("Usage: python .\\main.py (no arguments).", file=sys.stderr)
+        args = sys.argv[1:]
+        if args == ["signals"]:
+            from walkforward import run_signals_command
+
+            return run_signals_command()
+        if args:
+            print("Usage: python .\\main.py [signals]", file=sys.stderr)
             return 2
         return run_pipeline()
     except (ProjectXError, ValueError) as exc:

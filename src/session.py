@@ -7,6 +7,11 @@ from datetime import UTC, date, datetime, timedelta
 RTH_OPEN_MINUTES = 9 * 60 + 30
 RTH_CLOSE_MINUTES = 16 * 60
 
+# Globex session boundaries: opens Sunday 18:00 ET, closes Friday 17:00 ET,
+# with a 17:00-18:00 ET maintenance break Monday-Thursday.
+GLOBEX_OPEN_MINUTES = 18 * 60
+GLOBEX_CLOSE_MINUTES = 17 * 60
+
 # Scheduled times MNQ reacts to, in ET minutes from midnight:
 # 08:30 (CPI/NFP/etc.), 10:00 (ISM/sentiment), 14:00 (FOMC).
 KEY_EVENT_MINUTES = (8 * 60 + 30, 10 * 60, 14 * 60)
@@ -63,10 +68,24 @@ def minutes_since_open(dt_utc: datetime) -> int:
 
 
 def session_bucket(dt_utc: datetime) -> str:
-    """Coarse intraday regime label."""
-    if not is_weekday(dt_utc):
-        return "weekend"
-    minutes = eastern_minutes(dt_utc)
+    """Coarse intraday regime label, aware of the real Globex calendar.
+
+    Sunday evening after the 18:00 ET Globex open is real trading (overnight),
+    not a closed market. "closed" covers Saturday, Sunday before the open,
+    Friday after 17:00 ET, and the Monday-Thursday 17:00-18:00 ET maintenance
+    break.
+    """
+    eastern = to_eastern(dt_utc)
+    weekday = eastern.weekday()
+    minutes = eastern.hour * 60 + eastern.minute
+    if weekday == 5:  # Saturday
+        return "closed"
+    if weekday == 6:  # Sunday: Globex opens 18:00 ET
+        return "overnight" if minutes >= GLOBEX_OPEN_MINUTES else "closed"
+    if weekday == 4 and minutes >= GLOBEX_CLOSE_MINUTES:  # Friday after 17:00 ET
+        return "closed"
+    if GLOBEX_CLOSE_MINUTES <= minutes < GLOBEX_OPEN_MINUTES:  # daily maintenance
+        return "closed"
     if minutes < RTH_OPEN_MINUTES or minutes >= RTH_CLOSE_MINUTES:
         return "overnight"
     if minutes < RTH_OPEN_MINUTES + 60:

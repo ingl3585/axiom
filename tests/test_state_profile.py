@@ -8,9 +8,13 @@ import unittest
 
 import _bootstrap  # noqa: F401
 from state_profile import (
+    MIN_THRESHOLD_OBSERVATIONS,
+    ForwardOutcome,
     ProfileThresholds,
     StateProfileConfig,
+    SummaryStats,
     build_state_profile,
+    causal_thresholds,
     classify_market_state,
     forward_outcome,
 )
@@ -93,6 +97,57 @@ class StateClassificationTests(unittest.TestCase):
         self.assertAlmostEqual(outcome.forward_ticks, 8.0)
         self.assertAlmostEqual(outcome.mfe_ticks, 12.0)
         self.assertAlmostEqual(outcome.mae_ticks, 0.0)
+
+
+class CausalThresholdTests(unittest.TestCase):
+    def test_warmup_rows_get_no_thresholds(self) -> None:
+        rows = [{"vol_20bar": str(0.001 * (i + 1))} for i in range(10)]
+        thresholds = causal_thresholds(rows)
+        # Far fewer than MIN_THRESHOLD_OBSERVATIONS rows: everything is warmup.
+        self.assertTrue(len(rows) < MIN_THRESHOLD_OBSERVATIONS)
+        self.assertTrue(all(t.volatility_low is None for t in thresholds))
+
+    def test_thresholds_use_only_prior_rows(self) -> None:
+        count = MIN_THRESHOLD_OBSERVATIONS + 2
+        rows = [{"vol_20bar": "0.001"} for _ in range(count)]
+        # A huge final value must not influence the threshold applied to it.
+        rows[-1] = {"vol_20bar": "99.0"}
+        thresholds = causal_thresholds(rows)
+        self.assertIsNone(thresholds[0].volatility_low)  # warmup
+        last = thresholds[-1]
+        self.assertIsNotNone(last.volatility_low)
+        # Prior rows are all 0.001, so both thresholds equal 0.001 — proving the
+        # row's own (extreme) value was excluded.
+        self.assertAlmostEqual(last.volatility_low, 0.001)
+        self.assertAlmostEqual(last.volatility_high, 0.001)
+
+
+class SummaryStatsTests(unittest.TestCase):
+    def test_confidence_bounds_shrink_with_samples(self) -> None:
+        small = SummaryStats()
+        large = SummaryStats()
+        outcomes = [
+            ForwardOutcome(0.001, 4.0, 8.0, -2.0),
+            ForwardOutcome(-0.001, -2.0, 3.0, -6.0),
+            ForwardOutcome(0.002, 6.0, 9.0, -1.0),
+        ]
+        for outcome in outcomes:
+            small.add(outcome)
+        for _ in range(20):
+            for outcome in outcomes:
+                large.add(outcome)
+
+        small_dict = small.to_dict("small")
+        large_dict = large.to_dict("large")
+        self.assertAlmostEqual(small_dict["avg_forward_ticks"], 8.0 / 3)
+        # Same mean, but the larger sample has tighter 2se bounds.
+        small_width = small_dict["ucb_forward_ticks"] - small_dict["lcb_forward_ticks"]
+        large_width = large_dict["ucb_forward_ticks"] - large_dict["lcb_forward_ticks"]
+        self.assertLess(large_width, small_width)
+        # Single observation has no spread estimate.
+        single = SummaryStats()
+        single.add(outcomes[0])
+        self.assertIsNone(single.to_dict("single")["lcb_forward_ticks"])
 
 
 class BuildStateProfileTests(unittest.TestCase):

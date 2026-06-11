@@ -46,7 +46,7 @@ def recorder_script_path() -> Path:
     return Path(__file__).resolve().parents[1] / "scripts" / "projectx_realtime.mjs"
 
 
-def run_realtime_recorder(config: RecordingConfig) -> int:
+def build_recorder_command(config: RecordingConfig) -> list[str]:
     script = recorder_script_path()
     if not script.exists():
         raise ValueError(f"Recorder script not found: {script}")
@@ -70,9 +70,17 @@ def run_realtime_recorder(config: RecordingConfig) -> int:
     command.extend(["--feature-windows", config.feature_windows])
     command.extend(["--feature-interval-seconds", str(config.feature_interval_seconds)])
     command.extend(["--bar-interval-seconds", str(config.bar_interval_seconds)])
+    return command
 
+
+def start_realtime_recorder(config: RecordingConfig) -> subprocess.Popen:
+    """Launch the recorder as a child process the caller can watch."""
+    return subprocess.Popen(build_recorder_command(config))
+
+
+def run_realtime_recorder(config: RecordingConfig) -> int:
     try:
-        return subprocess.run(command, check=False).returncode
+        return subprocess.run(build_recorder_command(config), check=False).returncode
     except KeyboardInterrupt:
         print("\nRecording stopped by user.", file=sys.stderr)
         return 130

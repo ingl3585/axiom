@@ -8,7 +8,17 @@ Run the operational pipeline with:
 python .\main.py
 ```
 
-`python .\main.py` authenticates with Project X, backfills missing MNQ historical bars, normalizes raw data, builds feature tables, then records live quote/trade/depth data until you press `Ctrl+C`. When recording stops, it finalizes the latest capture.
+`python .\main.py` authenticates with Project X, backfills missing MNQ historical bars, normalizes raw data, builds feature tables, then records live quote/trade/depth data until you press `Ctrl+C`. While recording, the signal engine prints an observe-only decision for every completed bar (LONG/SHORT/FLAT with its receipt or abstention reason - no orders). When recording stops, it finalizes the capture, refreshes features and states with the new session, and runs the walk-forward edge-gate evaluation automatically.
+
+## Run Continuously
+
+Double-click `run_forever.cmd` (or run it from a terminal). It loops the
+pipeline: every time the session ends - nightly maintenance break, token
+expiry, network blip, or Ctrl+C - it finalizes that session, re-evaluates the
+edge gate, waits 60 seconds, then starts fresh (re-authenticating and
+backfilling anything missed). Stop it for real with Ctrl+C, then Y.
+
+For unattended overnight running, set Windows sleep to Never while plugged in.
 
 ## Setup
 
@@ -145,6 +155,17 @@ win rate, max favorable excursion, and max adverse excursion. This is a research
 map, not a trade signal. The point is to see which states are worth turning into
 real setup logic later.
 
+Statistical discipline is built in:
+
+- Volatility regimes use **causal thresholds** — expanding quantiles over prior
+  rows only, with a warmup — so no row is classified using future knowledge.
+- The best/worst leaderboards **exclude states with fewer than 100 rows** and
+  rank by **2-standard-error confidence bounds**, not raw averages — sorting
+  thousands of tiny states by average return would only surface selection-bias
+  flukes.
+- Forward windows overlap, so rows are autocorrelated and every statistic is
+  optimistic. Treat the report as hypothesis ranking, not proof.
+
 Outputs land next to the bar feature table:
 
 ```text
@@ -152,6 +173,55 @@ silver/projectx/states/bars/<contract>/<unit>/states.csv
 silver/projectx/states/bars/<contract>/<unit>/summary.md
 silver/projectx/states/bars/<contract>/<unit>/summary.json
 ```
+
+## Signals (edge-gated, abstention-first)
+
+```powershell
+python .\main.py signals
+```
+
+The signal engine maps each completed bar's market state to a decision: LONG,
+SHORT, or FLAT. It is abstention-first - its default answer is FLAT, and it
+only trades a state whose training-window confidence bound clears the ~2-tick
+round-trip cost with margin (and at least 100 prior observations). Every
+non-flat decision carries a receipt (state, sample size, confidence bounds,
+expected net ticks); every flat decision carries a reason code.
+
+`signals` runs a weekly walk-forward evaluation: train the edge ledger on all
+earlier weeks, evaluate on the next, roll forward. The report (markdown + JSON
+under `data/reports/signals/`) includes per-fold results, receipt calibration
+(expected vs realized), abstention tallies, and an **edge gate** verdict. The
+gate only opens on positive, diversified out-of-sample results (30+ trades, no
+single state carrying more than half the profit). A CLOSED gate on current
+data is expected and correct - the engine earns the right to trade as more
+recorded sessions accumulate.
+
+Hard vetoes regardless of edge: market closed, within 10 minutes of a
+scheduled event (08:30/10:00/14:00 ET), final 15 minutes of RTH. A risk veto
+(`risk_too_wide`) additionally refuses any state whose typical adverse
+excursion exceeds 40 ticks, no matter how good its average - strong means from
+violent states are lottery tickets, not edges.
+
+Overnight bars are evaluated, not banned - but costs are session-aware: RTH
+trades assume a 2-tick round trip, overnight trades 4 ticks (the spread widens
+when liquidity thins), and the required edge scales with the cost. The receipt
+records which cost was applied. An optional `rth_only` config restores the
+day-session-only behavior.
+
+Walk-forward trades are scored with the same stop the live engine carries
+(0.75x the state's average adverse excursion, plus 2 ticks of assumed stop
+slippage). Bar labels do not reveal ordering inside the window, so any trade
+whose adverse move reaches the stop counts as stopped out - conservative for
+trades that dipped and recovered.
+
+This runs automatically with the main pipeline: during recording, each
+completed live bar is classified and decided in real time (printed and logged
+to `data/live/projectx/signals/.../decisions.jsonl` with full receipts,
+observe-only); after recording stops, the session is folded into the data and
+the walk-forward gate re-evaluated. The live ledger is frozen at session start
+from the existing states table, so live decisions are out-of-sample by
+construction. `python .\main.py signals` remains available to re-run the
+evaluation on demand.
 
 ## Data Layout
 

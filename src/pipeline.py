@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import sys
+import time
 
 from bar_features import BarFeatureConfig, build_bar_features, contract_part_from_id
 from bars import build_session_bars, date_contract_partitions, load_continuous_bars
 from config import Settings
 from features import IntradayFeatureConfig, build_intraday_features
 from history import HistoryBackfillResult, backfill_historical_bars
+from live_signals import LiveSignalEngine, format_decision_line
 from normalize import append_manifest, normalize_history_dir, normalize_realtime_dir
 from projectx import (
     BarUnit,
@@ -18,8 +21,9 @@ from projectx import (
     compact_utc,
     unit_seconds,
 )
-from recording import RecordingConfig, run_realtime_recorder
+from recording import RecordingConfig, start_realtime_recorder
 from state_profile import StateProfileConfig, build_state_profile
+from walkforward import find_latest_states_path, run_signals_command
 
 DEFAULT_SYMBOL = "MNQ"
 DEFAULT_TICK_SIZE = 0.25
@@ -194,13 +198,14 @@ def build_bar_features_for_partition(
     )
     print(f"  states: {profile.rows_path}")
     print(f"  summary: {profile.markdown_path}")
+    print("  next: `python .\\main.py signals` evaluates the walk-forward edge gate")
 
 
 def record_live_data(settings: Settings, contract_id: str) -> int:
     print("Recording real-time Project X data. Press Ctrl+C to stop.")
     sys.stdout.flush()
     bar_unit = bar_unit_from_name(settings.bar_unit)
-    code = run_realtime_recorder(
+    process = start_realtime_recorder(
         RecordingConfig(
             contract_id=contract_id,
             events=DEFAULT_RECORD_EVENTS,
@@ -211,6 +216,8 @@ def record_live_data(settings: Settings, contract_id: str) -> int:
             bar_interval_seconds=unit_seconds(bar_unit, settings.bar_unit_number),
         )
     )
+    engine = build_live_engine(settings, contract_id, bar_unit)
+    code = watch_recording(process, engine)
 
     print_section("Finalize Recorded Data")
     try:
@@ -221,13 +228,67 @@ def record_live_data(settings: Settings, contract_id: str) -> int:
             interval_seconds=DEFAULT_INTERVAL_SECONDS,
             max_stale_quote_seconds=DEFAULT_MAX_STALE_QUOTE_SECONDS,
             tick_size=DEFAULT_TICK_SIZE,
-            bar_unit=bar_unit_from_name(settings.bar_unit),
+            bar_unit=bar_unit,
             bar_unit_number=settings.bar_unit_number,
         )
     except ValueError as exc:
         print(f"skipped recorded-data finalization: {exc}")
 
+    print_section("Session Edge Gate")
+    try:
+        build_bar_feature_table(settings, contract_id)
+        run_signals_command()
+    except ValueError as exc:
+        print(f"skipped session signals evaluation: {exc}")
+
     return code
+
+
+def build_live_engine(
+    settings: Settings,
+    contract_id: str,
+    bar_unit: BarUnit,
+) -> LiveSignalEngine | None:
+    states_path = find_latest_states_path(settings.data_dir)
+    if states_path is None:
+        print("live signals: no states.csv yet; live decisions disabled this session.")
+        return None
+    engine = LiveSignalEngine.from_disk(
+        data_dir=settings.data_dir,
+        contract_id=contract_id,
+        unit=bar_unit,
+        unit_number=settings.bar_unit_number,
+        states_path=states_path,
+    )
+    print(
+        "live signals: observe-only decision stream active "
+        f"(ledger states: {len(engine.ledger):,}); no orders are placed."
+    )
+    return engine
+
+
+def watch_recording(
+    process: subprocess.Popen,
+    engine: LiveSignalEngine | None,
+) -> int:
+    try:
+        while True:
+            code = process.poll()
+            if engine is not None:
+                for payload in engine.poll():
+                    print(format_decision_line(payload))
+                    sys.stdout.flush()
+            if code is not None:
+                return code
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        # The console delivers Ctrl+C to the recorder too; let it close cleanly.
+        print("\nRecording stopped by user.", file=sys.stderr)
+        try:
+            return process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return 130
 
 
 def finalize_realtime_capture(

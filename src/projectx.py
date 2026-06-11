@@ -54,6 +54,86 @@ class Contract:
         )
 
 
+@dataclass(frozen=True)
+class Account:
+    id: int
+    name: str
+    can_trade: bool
+    is_visible: bool
+    simulated: bool | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "Account":
+        return cls(
+            id=int(payload["id"]),
+            name=str(payload.get("name", "")),
+            can_trade=bool(payload.get("canTrade", False)),
+            is_visible=bool(payload.get("isVisible", False)),
+            simulated=(
+                bool(payload["simulated"])
+                if payload.get("simulated") is not None
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class OpenPosition:
+    id: int
+    account_id: int
+    contract_id: str
+    creation_timestamp: str
+    type: int
+    size: int
+    average_price: float
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "OpenPosition":
+        return cls(
+            id=int(payload["id"]),
+            account_id=int(payload["accountId"]),
+            contract_id=str(payload["contractId"]),
+            creation_timestamp=str(payload.get("creationTimestamp", "")),
+            type=int(payload.get("type", 0)),
+            size=int(payload.get("size", 0)),
+            average_price=float(payload.get("averagePrice", 0)),
+        )
+
+    @property
+    def direction(self) -> int:
+        if self.type == 1:
+            return 1
+        if self.type == 2:
+            return -1
+        return 0
+
+
+@dataclass(frozen=True)
+class OrderResult:
+    order_id: int | None
+    success: bool
+    error_code: int | None
+    error_message: str | None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> "OrderResult":
+        order_id = payload.get("orderId")
+        return cls(
+            order_id=int(order_id) if order_id is not None else None,
+            success=bool(payload.get("success", False)),
+            error_code=(
+                int(payload["errorCode"])
+                if payload.get("errorCode") is not None
+                else None
+            ),
+            error_message=(
+                str(payload["errorMessage"])
+                if payload.get("errorMessage") is not None
+                else None
+            ),
+        )
+
+
 def parse_utc_datetime(value: str | datetime) -> datetime:
     if isinstance(value, datetime):
         parsed = value
@@ -187,6 +267,54 @@ class ProjectXClient:
             {"searchText": search_text, "live": live},
         )
         return [Contract.from_payload(item) for item in payload.get("contracts", [])]
+
+    def search_accounts(self, only_active_accounts: bool = True) -> list[Account]:
+        payload = self._post(
+            "/api/Account/search",
+            {"onlyActiveAccounts": only_active_accounts},
+        )
+        return [Account.from_payload(item) for item in payload.get("accounts", [])]
+
+    def place_market_order(
+        self,
+        *,
+        account_id: int,
+        contract_id: str,
+        side: int,
+        size: int,
+        custom_tag: str | None = None,
+        stop_loss_ticks: int | None = None,
+    ) -> OrderResult:
+        order: dict[str, Any] = {
+            "accountId": account_id,
+            "contractId": contract_id,
+            "type": 2,
+            "side": side,
+            "size": size,
+        }
+        if custom_tag:
+            order["customTag"] = custom_tag
+        if stop_loss_ticks is not None and stop_loss_ticks > 0:
+            order["stopLossBracket"] = {"ticks": stop_loss_ticks, "type": 4}
+        return OrderResult.from_payload(self._post("/api/Order/place", order))
+
+    def search_open_positions(self, account_id: int) -> list[OpenPosition]:
+        payload = self._post("/api/Position/searchOpen", {"accountId": account_id})
+        return [
+            OpenPosition.from_payload(item)
+            for item in payload.get("positions", [])
+        ]
+
+    def close_contract_position(
+        self,
+        *,
+        account_id: int,
+        contract_id: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/api/Position/closeContract",
+            {"accountId": account_id, "contractId": contract_id},
+        )
 
     def retrieve_bars(
         self,

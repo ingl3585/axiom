@@ -24,6 +24,15 @@ class GateConfig:
     max_state_share: float = DEFAULT_MAX_STATE_SHARE
 
 
+@dataclass(frozen=True)
+class SignalReportResult:
+    result: WalkForwardResult
+    payload: dict[str, Any]
+    markdown_path: Path
+    json_path: Path
+    candidates_path: Path | None
+
+
 # Feature snapshot persisted with every candidate fire, so observations can
 # later be sliced by regime (time of day, stretch, participation, ...).
 CANDIDATE_FEATURE_SNAPSHOT = (
@@ -626,8 +635,11 @@ def features_path_for_states(states_path: Path) -> Path:
     return Path(*parts).with_name("features.csv")
 
 
-def run_signals_command() -> int:
-    settings = Settings.from_env()
+def run_signals_report(
+    settings: Settings | None = None,
+    emit: bool = True,
+) -> SignalReportResult:
+    settings = settings or Settings.from_env()
     states_path = find_latest_states_path(settings.data_dir)
     if states_path is None:
         raise ValueError("No states.csv found. Run `python .\\main.py` first.")
@@ -653,13 +665,27 @@ def run_signals_command() -> int:
     md_path.write_text(markdown, encoding="utf-8")
     json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
-    print(markdown)
+    if emit:
+        print(markdown)
     saved = f"Saved reports: {md_path}, {json_path}"
+    candidates_path = None
     if result.candidate_records:
         candidates_path = report_dir / f"candidates_{stamp}.csv"
         write_candidate_records(candidates_path, result.candidate_records)
         saved += f", {candidates_path}"
-    print(saved)
+    if emit:
+        print(saved)
+    return SignalReportResult(
+        result=result,
+        payload=payload,
+        markdown_path=md_path,
+        json_path=json_path,
+        candidates_path=candidates_path,
+    )
+
+
+def run_signals_command() -> int:
+    run_signals_report()
     return 0
 
 

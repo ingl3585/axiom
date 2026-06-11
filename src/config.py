@@ -37,6 +37,16 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def env_int_optional(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
+    try:
+        return int(value.strip())
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class Settings:
     projectx_username: str | None
@@ -49,6 +59,12 @@ class Settings:
     bar_unit_number: int
     history_days: int
     raw_retention_days: int
+    execution_enabled: bool
+    execution_dry_run: bool
+    execution_account_id: int | None
+    execution_max_contracts: int
+    execution_require_gate_open: bool
+    execution_allow_live: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -68,6 +84,15 @@ class Settings:
             bar_unit_number=env_int("AXIOM_BAR_UNIT_NUMBER", 1),
             history_days=env_int("AXIOM_HISTORY_DAYS", 365),
             raw_retention_days=env_int("AXIOM_RAW_RETENTION_DAYS", 14),
+            execution_enabled=env_bool("AXIOM_EXECUTION_ENABLED", default=False),
+            execution_dry_run=env_bool("AXIOM_EXECUTION_DRY_RUN", default=True),
+            execution_account_id=env_int_optional("AXIOM_EXECUTION_ACCOUNT_ID"),
+            execution_max_contracts=env_int("AXIOM_EXECUTION_MAX_CONTRACTS", 1),
+            execution_require_gate_open=env_bool(
+                "AXIOM_EXECUTION_REQUIRE_GATE_OPEN",
+                default=True,
+            ),
+            execution_allow_live=env_bool("AXIOM_EXECUTION_ALLOW_LIVE", default=False),
         )
 
     def require_projectx_credentials(self) -> tuple[str, str]:
@@ -77,4 +102,3 @@ class Settings:
                 "the environment."
             )
         return self.projectx_username, self.projectx_api_key
-

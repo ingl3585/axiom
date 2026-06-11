@@ -8,6 +8,11 @@ import time
 from bar_features import BarFeatureConfig, build_bar_features, contract_part_from_id
 from bars import build_session_bars, date_contract_partitions, load_continuous_bars
 from config import Settings
+from execution import (
+    ExecutionConfig,
+    ExecutionController,
+    format_execution_event,
+)
 from features import IntradayFeatureConfig, build_intraday_features
 from history import HistoryBackfillResult, backfill_historical_bars
 from live_signals import LiveSignalEngine, format_decision_line
@@ -24,7 +29,7 @@ from projectx import (
 from recording import RecordingConfig, start_realtime_recorder
 from retention import compress_old_realtime
 from state_profile import StateProfileConfig, build_state_profile
-from walkforward import find_latest_states_path, run_signals_command
+from walkforward import find_latest_states_path, run_signals_report
 
 DEFAULT_SYMBOL = "MNQ"
 DEFAULT_TICK_SIZE = 0.25
@@ -73,15 +78,19 @@ def run_pipeline() -> int:
     build_bar_feature_table(settings, backfill_result.contract.id)
 
     print_section("Edge Gate")
+    gate_open = False
     try:
-        run_signals_command()
+        signal_report = run_signals_report(settings)
+        gate_open = signal_report.result.gate_open
     except ValueError as exc:
         print(f"skipped signals evaluation: {exc}")
 
     print_section("Live Recording")
     code = record_live_data(
         settings=settings,
+        client=client,
         contract_id=backfill_result.contract.id,
+        gate_open=gate_open,
     )
     if code:
         return code
@@ -214,7 +223,12 @@ def build_bar_features_for_partition(
     print(f"  summary: {profile.markdown_path}")
 
 
-def record_live_data(settings: Settings, contract_id: str) -> int:
+def record_live_data(
+    settings: Settings,
+    client: ProjectXClient,
+    contract_id: str,
+    gate_open: bool,
+) -> int:
     print("Recording real-time Project X data. Press Ctrl+C to stop.")
     sys.stdout.flush()
     bar_unit = bar_unit_from_name(settings.bar_unit)
@@ -222,6 +236,7 @@ def record_live_data(settings: Settings, contract_id: str) -> int:
     # gap: the engine's bootstrap absorbs pre-existing live files silently,
     # and every bar the new recorder emits is then decided on.
     engine = build_live_engine(settings, contract_id, bar_unit)
+    executor = build_execution_controller(settings, client, contract_id, gate_open)
     process = start_realtime_recorder(
         RecordingConfig(
             contract_id=contract_id,
@@ -233,7 +248,7 @@ def record_live_data(settings: Settings, contract_id: str) -> int:
             bar_interval_seconds=unit_seconds(bar_unit, settings.bar_unit_number),
         )
     )
-    code = watch_recording(process, engine)
+    code = watch_recording(process, engine, executor)
 
     print_section("Finalize Recorded Data")
     try:
@@ -279,9 +294,30 @@ def build_live_engine(
     return engine
 
 
+def build_execution_controller(
+    settings: Settings,
+    client: ProjectXClient,
+    contract_id: str,
+    gate_open: bool,
+) -> ExecutionController | None:
+    if not settings.execution_enabled:
+        return None
+    controller = ExecutionController(
+        client=client,
+        config=ExecutionConfig.from_settings(settings),
+        data_dir=settings.data_dir,
+        contract_id=contract_id,
+        gate_open=gate_open,
+    )
+    for event in controller.startup():
+        print(format_execution_event(event))
+    return controller
+
+
 def watch_recording(
     process: subprocess.Popen,
     engine: LiveSignalEngine | None,
+    executor: ExecutionController | None = None,
 ) -> int:
     try:
         while True:
@@ -289,6 +325,9 @@ def watch_recording(
             if engine is not None:
                 for payload in engine.poll():
                     print(format_decision_line(payload))
+                    if executor is not None:
+                        for event in executor.on_decision(payload):
+                            print(format_execution_event(event))
                     sys.stdout.flush()
             if code is not None:
                 return code

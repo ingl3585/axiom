@@ -55,6 +55,14 @@ AXIOM_HISTORY_DAYS=365
 
 # Gzip raw realtime captures older than this many days (0 disables).
 AXIOM_RAW_RETENTION_DAYS=14
+
+# Execution is off by default. Keep dry-run true until account checks look good.
+AXIOM_EXECUTION_ENABLED=false
+AXIOM_EXECUTION_DRY_RUN=true
+AXIOM_EXECUTION_ACCOUNT_ID=
+AXIOM_EXECUTION_MAX_CONTRACTS=1
+AXIOM_EXECUTION_REQUIRE_GATE_OPEN=true
+AXIOM_EXECUTION_ALLOW_LIVE=false
 ```
 
 ## Main Run
@@ -265,6 +273,37 @@ states table, so live decisions are out-of-sample by construction.
 `python .\main.py signals` remains available to re-run the evaluation on
 demand.
 
+## Practice Execution
+
+Axiom can wire observe-only decisions into Project X order endpoints, but it is
+disabled by default. The first version is intentionally small: one market entry
+at a time, optional Project X stop-loss bracket from the signal's stop, no
+instant reversal, close on opposite signal or time exit, and JSONL receipts under
+`data/live/projectx/execution/.../events.jsonl`.
+
+For a practice-account smoke test:
+
+```text
+PROJECTX_LIVE=false
+AXIOM_EXECUTION_ENABLED=true
+AXIOM_EXECUTION_DRY_RUN=false
+AXIOM_EXECUTION_ACCOUNT_ID=<your practice account id>
+AXIOM_EXECUTION_MAX_CONTRACTS=1
+```
+
+By default, execution also requires the walk-forward edge gate to be open. While
+the gate is closed, live signals are logged but orders are blocked with
+`global_gate_closed`. If you explicitly want practice-account order plumbing to
+fire while the research gate is closed, set:
+
+```text
+AXIOM_EXECUTION_REQUIRE_GATE_OPEN=false
+```
+
+`AXIOM_EXECUTION_ALLOW_LIVE=false` prevents orders when `PROJECTX_LIVE=true`.
+Leave it that way unless you deliberately intend to test a live-data/live-account
+configuration later.
+
 ## Data Layout
 
 ```text
@@ -278,6 +317,7 @@ data/
   silver/projectx/states/bars/    market-state profiles and summaries
   live/projectx/features/     rolling live feature snapshots
   live/projectx/bars/         real-time OHLCV bars emitted as each interval closes
+  live/projectx/execution/    execution bridge receipts (dry-run or practice)
   state/history_state.json    historical backfill resume state
 ```
 
@@ -285,4 +325,4 @@ Raw files are the audit trail. Bronze files are cleaned enough for analysis. Sil
 
 ## Current Scope
 
-Axiom currently ingests, cleans, and builds features from Project X market data, records live market data, and generates observe-only trade signals with full receipts behind a walk-forward edge gate. It does not place orders. Execution (paper/practice account first, behind explicit risk controls) is deliberately deferred until the edge gate opens on out-of-sample evidence.
+Axiom currently ingests, cleans, and builds features from Project X market data, records live market data, generates observe-only trade signals with full receipts behind a walk-forward edge gate, and includes disabled-by-default practice execution plumbing. Real execution remains opt-in via environment flags and should start with one MNQ contract in a practice account.

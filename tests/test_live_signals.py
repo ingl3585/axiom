@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import unittest
 
 import _bootstrap  # noqa: F401
+from candidates import Setup
 from live_signals import LiveSignalEngine, format_decision_line
 from signals import EdgeLedger, SignalConfig
 
@@ -103,6 +104,23 @@ class LiveSignalEngineTests(unittest.TestCase):
         self.assertEqual(len(engine.bars_by_key), 1)
         only = next(iter(engine.bars_by_key.values()))
         self.assertEqual(only["c"], 2)  # later ingest wins
+
+    def test_live_payload_reports_blocked_candidates(self) -> None:
+        probe = Setup("always_long", "v1", "test setup", lambda row, prev: 1)
+        engine = LiveSignalEngine(
+            ledger=ledger_with("never_matches", [8.0] * 120),
+            bars=make_bars(RTH_START, 30),
+            setups=(probe,),
+        )
+        payload = engine.evaluate_latest()
+        self.assertEqual(len(payload["candidates"]), 1)
+        candidate = payload["candidates"][0]
+        self.assertEqual(candidate["setup"], "always_long@v1")
+        self.assertFalse(candidate["approved"])
+        self.assertEqual(candidate["gate_reason"], "unknown_state")
+        # The blocked candidate is visible in the printed line.
+        line = format_decision_line(payload)
+        self.assertIn("cand: always_long@v1 LONG blocked(unknown_state)", line)
 
     def test_format_decision_lines_are_ascii(self) -> None:
         flat = format_decision_line(

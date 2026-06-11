@@ -95,13 +95,23 @@ class EdgeLedger:
         self._stats = stats
 
     @classmethod
-    def from_state_rows(cls, rows: list[dict[str, Any]]) -> "EdgeLedger":
+    def from_state_rows(
+        cls,
+        rows: list[dict[str, Any]],
+        key_field: str = "broad_state_key",
+    ) -> "EdgeLedger":
+        """Build the ledger keyed on the broad (gating) state.
+
+        Falls back to the detailed key for rows that predate the broad column.
+        Gating on broad states means evidence accumulates fast; the detailed
+        states remain in the table for research.
+        """
         groups: dict[str, SummaryStats] = {}
         for row in rows:
             outcome = outcome_from_profiled_row(row)
             if outcome is None:
                 continue
-            key = str(row.get("state_key") or "")
+            key = str(row.get(key_field) or row.get("state_key") or "")
             if not key:
                 continue
             groups.setdefault(key, SummaryStats()).add(outcome)
@@ -113,6 +123,28 @@ class EdgeLedger:
 
     def __len__(self) -> int:
         return len(self._stats)
+
+
+def direction_adverse_ticks(stats: dict[str, Any], direction: int) -> float | None:
+    """Typical excursion against a trade in `direction` for this state.
+
+    Longs suffer the downside (MAE); shorts suffer the upside (MFE).
+    """
+    if direction > 0:
+        mae = stats.get("avg_mae_ticks")
+        return abs(mae) if mae is not None else None
+    mfe = stats.get("avg_mfe_ticks")
+    return mfe if mfe is not None else None
+
+
+def stop_for(
+    stats: dict[str, Any],
+    direction: int,
+    config: SignalConfig = SignalConfig(),
+) -> float | None:
+    """The stop the engine would carry for a trade in `direction`."""
+    adverse = direction_adverse_ticks(stats, direction)
+    return adverse * config.stop_mae_fraction if adverse is not None else None
 
 
 def veto_reason(row: dict[str, Any], config: SignalConfig) -> str | None:
@@ -155,7 +187,7 @@ def decide(
     if veto is not None:
         return Decision(direction=0, reason=veto)
 
-    state_key = str(row.get("state_key") or "")
+    state_key = str(row.get("broad_state_key") or row.get("state_key") or "")
     stats = ledger.get(state_key) if state_key else None
     if stats is None:
         return Decision(direction=0, reason="unknown_state", state_key=state_key)
@@ -167,11 +199,35 @@ def decide(
         return Decision(direction=0, reason="insufficient_n", state_key=state_key, n=n)
 
     average = stats["avg_forward_ticks"]
-    average_mae = stats.get("avg_mae_ticks")
 
-    # Risk veto: a great average from a state with violent swings is a lottery
-    # ticket, not an edge. Refuse it before any direction logic.
-    if average_mae is not None and abs(average_mae) > config.max_state_mae_ticks:
+    # Costs are session-aware: overnight trades must clear a higher bar
+    # because the spread is wider when liquidity is thin.
+    cost = config.session_cost_ticks(row)
+    threshold = cost + config.edge_margin_ticks
+
+    if lcb > threshold:
+        direction = 1
+        reason = "edge_long"
+        expected = average - cost
+        adverse = direction_adverse_ticks(stats, direction)
+    elif ucb < -threshold:
+        direction = -1
+        reason = "edge_short"
+        expected = -average - cost
+        adverse = direction_adverse_ticks(stats, direction)
+    else:
+        return Decision(
+            direction=0,
+            reason="edge_below_cost",
+            state_key=state_key,
+            n=n,
+            lcb_ticks=lcb,
+            ucb_ticks=ucb,
+        )
+
+    # Risk veto: a great average from a state with violent swings against the
+    # trade direction is a lottery ticket, not an edge.
+    if adverse is not None and adverse > config.max_state_mae_ticks:
         return Decision(
             direction=0,
             reason="risk_too_wide",
@@ -181,46 +237,16 @@ def decide(
             ucb_ticks=ucb,
         )
 
-    stop_ticks = (
-        abs(average_mae) * config.stop_mae_fraction if average_mae is not None else None
-    )
-
-    # Costs are session-aware: overnight trades must clear a higher bar
-    # because the spread is wider when liquidity is thin.
-    cost = config.session_cost_ticks(row)
-    threshold = cost + config.edge_margin_ticks
-
-    if lcb > threshold:
-        return Decision(
-            direction=1,
-            reason="edge_long",
-            state_key=state_key,
-            n=n,
-            lcb_ticks=lcb,
-            ucb_ticks=ucb,
-            expected_ticks_net=average - cost,
-            stop_ticks=stop_ticks,
-            cost_ticks=cost,
-        )
-    if ucb < -threshold:
-        return Decision(
-            direction=-1,
-            reason="edge_short",
-            state_key=state_key,
-            n=n,
-            lcb_ticks=lcb,
-            ucb_ticks=ucb,
-            expected_ticks_net=-average - cost,
-            stop_ticks=stop_ticks,
-            cost_ticks=cost,
-        )
     return Decision(
-        direction=0,
-        reason="edge_below_cost",
+        direction=direction,
+        reason=reason,
         state_key=state_key,
         n=n,
         lcb_ticks=lcb,
         ucb_ticks=ucb,
+        expected_ticks_net=expected,
+        stop_ticks=adverse * config.stop_mae_fraction if adverse is not None else None,
+        cost_ticks=cost,
     )
 
 

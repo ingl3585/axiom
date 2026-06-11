@@ -121,15 +121,26 @@ class PipelineFinalizeTests(unittest.TestCase):
 
             self.assertTrue(quote_path.exists())
             self.assertTrue(feature_path.exists())
-            self.assertTrue(bar_feature_path.exists())
-            self.assertTrue(state_path.exists())
             with feature_path.open(encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 3)
             self.assertEqual(rows[0]["forward_mfe_ticks_1s"], "2.0")
-            with bar_feature_path.open(encoding="utf-8") as handle:
-                bar_rows = list(csv.DictReader(handle))
-            self.assertEqual(len(bar_rows), 1)
+            # Bar features and states are intentionally NOT rebuilt at
+            # finalize: the next pipeline run folds the session in exactly
+            # once at startup (no duplicate rebuild across run_forever cycles).
+            self.assertFalse(bar_feature_path.exists())
+            self.assertFalse(state_path.exists())
+            # The session bars themselves ARE built, ready for that fold-in.
+            session_bars = (
+                data_dir
+                / "bronze"
+                / "projectx"
+                / "bars"
+                / "contract=CON_F_US_MNQ_M26"
+                / "unit=minute_1"
+                / "live_2026-06-04.csv"
+            )
+            self.assertTrue(session_bars.exists())
 
 
 if __name__ == "__main__":

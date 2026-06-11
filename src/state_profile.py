@@ -34,6 +34,11 @@ STATE_DIMENSIONS = [
     "rsi_state",
 ]
 
+# The broad key is the coarse subset used for signal gating: few enough
+# combinations that states accumulate evidence quickly. The detailed 8-dim
+# key stays in the table for research.
+BROAD_STATE_DIMENSIONS = ("session_state", "trend_state", "volatility_state")
+
 
 @dataclass(frozen=True)
 class StateProfileConfig:
@@ -71,6 +76,10 @@ class MarketState:
             ]
         )
 
+    @property
+    def broad_key(self) -> str:
+        return "|".join([self.session_state, self.trend_state, self.volatility_state])
+
     def to_dict(self) -> dict[str, str]:
         return {
             "session_state": self.session_state,
@@ -82,6 +91,7 @@ class MarketState:
             "flow_state": self.flow_state,
             "rsi_state": self.rsi_state,
             "state_key": self.key,
+            "broad_state_key": self.broad_key,
         }
 
 
@@ -405,6 +415,7 @@ def profile_payload(
     leaderboard_min_count: int = DEFAULT_LEADERBOARD_MIN_COUNT,
 ) -> dict[str, Any]:
     state_summaries = summarize(rows, "state_key", min_count)
+    broad_state_summaries = summarize(rows, "broad_state_key", min_count)
     dimension_summaries = {
         dimension: summarize(rows, dimension, min_count=1)
         for dimension in STATE_DIMENSIONS
@@ -423,6 +434,7 @@ def profile_payload(
             "volatility_high": thresholds.volatility_high,
         },
         "state_summaries": state_summaries,
+        "broad_state_summaries": broad_state_summaries,
         "dimension_summaries": dimension_summaries,
     }
 
@@ -543,6 +555,7 @@ def state_fieldnames(horizon_bars: int) -> list[str]:
         "t",
         "c",
         "state_key",
+        "broad_state_key",
         *STATE_DIMENSIONS,
         "has_forward_outcome",
         f"forward_return_{horizon_bars}bar",

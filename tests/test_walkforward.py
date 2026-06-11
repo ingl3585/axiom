@@ -4,8 +4,15 @@ from datetime import UTC, datetime, timedelta
 import unittest
 
 import _bootstrap  # noqa: F401
+from candidates import Setup
 from signals import SignalConfig
-from walkforward import GateConfig, evaluate_walk_forward, trade_outcome
+from walkforward import (
+    GateConfig,
+    evaluate_walk_forward,
+    trade_outcome,
+    walkforward_markdown,
+    write_candidate_records,
+)
 
 WEEK_MONDAYS = [
     datetime(2026, 5, 4, 14, 0, tzinfo=UTC),
@@ -149,6 +156,101 @@ class WalkForwardTests(unittest.TestCase):
         self.assertFalse(result.gate_open)
         self.assertEqual(result.overall()["trades"], 0)
         self.assertIn("no out-of-sample trades", result.gate_reasons)
+
+    def test_candidates_are_observed_and_gated(self) -> None:
+        # A planted always-long setup fires throughout; the gate blocks it in
+        # the thin fold (insufficient_n) and approves it once states qualify.
+        probe = Setup("always_long", "v1", "test setup", lambda row, prev: 1)
+        rows = make_rows(lambda i: 7.0 if i % 2 == 0 else 9.0)
+        result = evaluate_walk_forward(rows, setups=(probe,))
+
+        summaries = {
+            item["setup"]: item
+            for item in result.to_dict()["candidate_summaries"]
+        }
+        self.assertIn("always_long@v1", summaries)
+        stats = summaries["always_long@v1"]
+        self.assertGreater(stats["fires"], 0)
+        self.assertGreater(stats["approved"], 0)
+        self.assertGreater(stats["blocked"].get("insufficient_n", 0), 0)
+        self.assertGreater(stats["outcomes"], 0)
+        # Observations are scored with the same costs/stops as trades.
+        self.assertGreater(stats["total_net_ticks"], 0)
+        # Per-setup cooldown keeps observation windows from overlapping:
+        # 120 bars per fold / (horizon 5) caps fires per fold at 24.
+        self.assertLessEqual(stats["fires"], 24 * len(result.folds))
+        # Re-fires inside the cooldown are counted, not silently dropped.
+        self.assertGreater(stats["suppressed_overlapping_fires"], 0)
+        self.assertEqual(len(result.candidate_records), stats["fires"])
+
+    def test_candidate_blocked_when_gate_opposes(self) -> None:
+        probe = Setup("always_short", "v1", "test setup", lambda row, prev: -1)
+        rows = make_rows(lambda i: 7.0 if i % 2 == 0 else 9.0)
+        result = evaluate_walk_forward(rows, setups=(probe,))
+        stats = {
+            item["setup"]: item
+            for item in result.to_dict()["candidate_summaries"]
+        }["always_short@v1"]
+        # In qualified folds the gate says LONG while the candidate says
+        # SHORT: blocked as gate_opposes, never approved.
+        self.assertEqual(stats["approved"], 0)
+        self.assertGreater(stats["blocked"].get("gate_opposes", 0), 0)
+        # The short candidate is stopped against ITS OWN adverse side (the
+        # upside, avg mfe = 10 -> stop 7.5; entry-bar mfe 9 or 11 always
+        # breaches it), not the long decision's MAE-based stop.
+        self.assertGreater(stats["stopped"], 0)
+        self.assertEqual(stats["stopped"], stats["outcomes"])
+        # Every stopped short loses (7.5 + 2 slippage + 2 cost) = -11.5.
+        self.assertAlmostEqual(
+            stats["avg_net_ticks"], -11.5, places=6
+        )
+
+    def test_candidate_fires_are_logged_with_entry_features(self) -> None:
+        import csv
+        import tempfile
+        from pathlib import Path
+
+        probe = Setup("always_long", "v1", "test setup", lambda row, prev: 1)
+        rows = make_rows(lambda i: 7.0 if i % 2 == 0 else 9.0)
+        result = evaluate_walk_forward(rows, setups=(probe,))
+
+        records = result.candidate_records
+        self.assertGreater(len(records), 0)
+        first = records[0]
+        self.assertEqual(first.setup_key, "always_long@v1")
+        # The entry-feature snapshot is captured per fire.
+        self.assertEqual(first.features["session_bucket"], "midday")
+        self.assertEqual(first.features["minutes_since_open"], "120")
+        # Aggregate outcome count matches the records that carry an outcome.
+        with_outcome = sum(1 for record in records if record.net_ticks is not None)
+        summary = result.to_dict()["candidate_summaries"][0]
+        self.assertEqual(with_outcome, summary["outcomes"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "candidates.csv"
+            write_candidate_records(path, records)
+            with path.open(encoding="utf-8") as handle:
+                csv_rows = list(csv.DictReader(handle))
+            self.assertEqual(len(csv_rows), len(records))
+            self.assertEqual(csv_rows[0]["setup"], "always_long@v1")
+            self.assertIn("rsi_9", csv_rows[0])
+            self.assertIn(csv_rows[0]["approved"], {"0", "1"})
+
+    def test_candidate_markdown_reports_suppressed_refires(self) -> None:
+        probe = Setup("always_long", "v1", "test setup", lambda row, prev: 1)
+        rows = make_rows(lambda i: 7.0 if i % 2 == 0 else 9.0)
+        result = evaluate_walk_forward(rows, setups=(probe,))
+        payload = result.to_dict()
+        payload["generated_at"] = "2026-06-11T00:00:00Z"
+        payload["states_path"] = "states.csv"
+
+        markdown = walkforward_markdown(payload)
+
+        self.assertIn("| setup | fires | suppressed | approved |", markdown)
+        suppressed = payload["candidate_summaries"][0]["suppressed_overlapping_fires"]
+        self.assertGreater(suppressed, 0)
+        self.assertIn("| always_long@v1 |", markdown)
+        self.assertIn(f"| {suppressed:,} |", markdown)
 
     def test_concentrated_profit_keeps_gate_closed(self) -> None:
         # stateA carries a strong edge, stateB none: trades happen but profit

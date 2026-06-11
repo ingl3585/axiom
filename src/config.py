@@ -48,6 +48,7 @@ class Settings:
     bar_unit: str
     bar_unit_number: int
     history_days: int
+    raw_retention_days: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -66,6 +67,7 @@ class Settings:
             bar_unit=(os.environ.get("AXIOM_BAR_UNIT") or "minute").strip().lower(),
             bar_unit_number=env_int("AXIOM_BAR_UNIT_NUMBER", 1),
             history_days=env_int("AXIOM_HISTORY_DAYS", 365),
+            raw_retention_days=env_int("AXIOM_RAW_RETENTION_DAYS", 14),
         )
 
     def require_projectx_credentials(self) -> tuple[str, str]:

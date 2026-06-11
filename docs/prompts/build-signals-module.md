@@ -194,6 +194,115 @@ suite after each step, and report honestly what the gate says at the end.
       everywhere, with receipts, until accumulating sessions produce a
       risk-contained edge that opens the gate on evidence.
 
+### Phase 1 of the long-term plan (fix and simplify)
+
+- [x] Short-side risk/stop fix: decide() now picks the trade direction first,
+      then calibrates the risk veto and stop from that direction's adverse
+      side - longs use the state's avg MAE (downside), shorts use avg MFE
+      (upside). Previously both used MAE.
+- [x] Broad gating keys: states.csv now carries `broad_state_key`
+      (session|trend|volatility, a few dozen combos). EdgeLedger and decide()
+      gate on broad keys (detailed-key fallback for old rows); detailed 8-dim
+      states remain for research. Profiler payload gains
+      `broad_state_summaries`.
+- [x] Duplicate rebuild removed: edge gate now runs once at pipeline start
+      (after features/states rebuild); session-end rebuild deleted - each
+      session folds in exactly once via the run_forever cycle.
+- [x] Raw-data retention: `retention.compress_old_realtime` gzips realtime
+      JSONL older than AXIOM_RAW_RETENTION_DAYS (default 14) in place -
+      compress, never delete. Wired after Normalize.
+- [x] Tests: 74 green (short-stop value, short-side risk veto with calm
+      contrast, broad-key pooling, 3 retention tests), ruff clean.
+- [x] Real-data verification (2026-06-11): gate CLOSED, OOS -775 ticks over
+      100 trades. Broad keys transformed the landscape: edge_below_cost
+      26,818 (was 2,727), insufficient_n 2,653 (was 20,982), unknown_state 78
+      (was 3,080) - the system now JUDGES nearly every bar instead of pleading
+      ignorance. Trades concentrated in the earliest folds (W20/W21, trained
+      on one thin week) and stopped entirely from W22 on as estimates
+      tightened - self-correction now happens early. Same overall verdict on
+      this month: no bar-level edge after costs.
+
+### Phase 2: candidate-signal layer
+
+- [x] `src/candidates.py` - four pre-registered, versioned setups
+      (trend_pullback@v1, vwap_reclaim@v1, failed_breakout@v1,
+      exhaustion_reversal@v1), each a pure function with a structural thesis.
+      Frozen rules; rule changes require a version bump.
+- [x] Walk-forward integration: candidates observed on every fold bar with
+      per-setup horizon cooldowns, gate verdict per fire (approved /
+      blocked-with-reason / gate_opposes), outcomes scored by the same
+      trade_outcome machinery (costs, stops where available). New
+      "Candidate Setups" report section + payload `candidate_summaries`.
+- [x] Live stream: candidates fire per completed bar, appear in the printed
+      line (`| cand: vwap_reclaim@v1 LONG blocked(insufficient_n)`) and in
+      decisions.jsonl - blocked ideas stay visible instead of collapsing
+      into FLAT.
+- [x] Tests: 82 green (setup rules x4, versioned keys, walk-forward
+      observation + gate_opposes, live payload + line format), ruff clean.
+- [x] Real-data first read (one month, defined-today rules, honest costs):
+      trend_pullback@v1 1,086 fires avg -1.38; exhaustion_reversal@v1 139
+      fires avg -1.11; vwap_reclaim@v1 174 fires avg -6.40; failed_breakout@v1
+      70 fires avg -13.74. All net-negative after costs - consistent with the
+      no-bar-edge verdict; now measured per named hypothesis. NOTE: inverting
+      failed_breakout because of this table would be data mining - an
+      inverted setup is a new hypothesis to pre-register and judge on future
+      sessions only.
+
+### Phase 3: gate as second layer + per-fire observation log
+
+- Phase 3's core (gate as second layer over candidates: approved / blocked /
+  reason, blocked ideas visible) was already delivered inside Phase 2.
+- [x] The missing spec item - "features at entry" - is now a durable per-fire
+      log: every candidate fire is persisted to
+      `data/reports/signals/candidates_<ts>.csv` with timestamp, setup,
+      direction, gate verdict + reason, state key, stop-managed net outcome,
+      and an entry-condition snapshot (session, minutes_since_open, rsi_9,
+      dist_vwap, vwap_sigma, vol_ratio_20bar, or_breakout). This is the raw
+      material for Phase 5's slice-by-regime review.
+- [x] 83 tests green, ruff clean; real-data run writes the CSV (~1,500 fires).
+
+### Review fixes (post-Phase-3 code review)
+
+- [x] Suppressed re-fires are now counted: CandidateStats gains
+      `suppressed_overlapping_fires` (re-fires inside the horizon cooldown are
+      tallied, not silently dropped); test pins records == fires and
+      suppressed > 0.
+- [x] README wording made precise: observations are non-overlapping; stops
+      derive from the candidate's own direction via state history (not "where
+      the gate supplied one"); the snapshot is the signal bar's conditions,
+      entry is the next bar. 83 tests green, ruff clean.
+
+### Review fixes (post-Phase-2 code review)
+
+- [x] Candidate stop mismatch: candidates are now scored with a stop derived
+      for the CANDIDATE's direction from the row's state stats
+      (signals.stop_for / direction_adverse_ticks - one formula shared with
+      decide(), no fork). Previously a short candidate could inherit a long
+      decision's MAE stop, or no stop at all when the gate was flat.
+      Test pins the exact stopped-short economics (-11.5/observation).
+- [x] README run_forever paragraph: finalize -> exit -> wait -> next startup
+      folds in + evaluates gate (was claiming gate ran before the wait).
+- [x] Corrected real-data table (stops now applied to all observations):
+      exhaustion_reversal -10.15 avg (73/139 stopped), failed_breakout -6.70,
+      trend_pullback -3.37 (559/1085 stopped), vwap_reclaim +0.96 (+167 total,
+      88/174 stopped). vwap_reclaim flipping positive is a hypothesis to
+      watch, not a result: n=174, one month, and ~SE 0.8 means t ~ 1.2.
+      82 tests green, ruff clean.
+
+### Review fixes (post-Phase-1 code review)
+
+- [x] Duplicate rebuild (for real this time): a finalize-path call to
+      build_bar_features_for_partition had been reintroduced inside
+      build_session_bars_from_outputs - removed. Bar features/states/gate now
+      run exactly once per cycle, at startup. Finalize test updated to assert
+      the absence (and that session bars ARE built for the next fold-in).
+- [x] Startup gap: the live engine is now built BEFORE the recorder starts,
+      so no bar can close unseen between recorder launch and engine bootstrap.
+- [x] README de-staled: intro reflects gate-at-start ordering; Current Scope
+      now says Axiom generates observe-only signals behind the gate (it no
+      longer claims "no signals").
+- [x] 74 tests green, ruff clean.
+
 ### Session-aware costs (user decision: do not ban overnight)
 
 - [x] `rth_only` default flipped to False - overnight bars are evaluated, not

@@ -13,7 +13,12 @@ from signals import (
 )
 
 
-def state_rows(key: str, ticks: list[float], mae: float = -1.0) -> list[dict[str, str]]:
+def state_rows(
+    key: str,
+    ticks: list[float],
+    mae: float = -1.0,
+    mfe: float | None = None,
+) -> list[dict[str, str]]:
     rows = []
     for value in ticks:
         rows.append(
@@ -22,7 +27,7 @@ def state_rows(key: str, ticks: list[float], mae: float = -1.0) -> list[dict[str
                 "has_forward_outcome": "1",
                 "forward_return_5bar": str(value * 0.0001),
                 "forward_ticks_5bar": str(value),
-                "forward_mfe_ticks_5bar": str(abs(value) + 2),
+                "forward_mfe_ticks_5bar": str(mfe if mfe is not None else abs(value) + 2),
                 "forward_mae_ticks_5bar": str(mae),
             }
         )
@@ -39,8 +44,13 @@ def tradeable_row(state_key: str = "good") -> dict[str, str]:
     }
 
 
-def ledger_with(key: str, ticks: list[float], mae: float = -1.0) -> EdgeLedger:
-    return EdgeLedger.from_state_rows(state_rows(key, ticks, mae=mae))
+def ledger_with(
+    key: str,
+    ticks: list[float],
+    mae: float = -1.0,
+    mfe: float | None = None,
+) -> EdgeLedger:
+    return EdgeLedger.from_state_rows(state_rows(key, ticks, mae=mae, mfe=mfe))
 
 
 class DecideTests(unittest.TestCase):
@@ -65,6 +75,37 @@ class DecideTests(unittest.TestCase):
         self.assertEqual(decision.reason, "edge_short")
         self.assertLess(decision.ucb_ticks, -3.0)
         self.assertAlmostEqual(decision.expected_ticks_net, 6.0)
+        # Short stops calibrate from the UPSIDE excursion (avg mfe = 10),
+        # not the downside mae the long side uses.
+        self.assertAlmostEqual(decision.stop_ticks, 7.5)  # 0.75 x 10
+
+    def test_short_risk_veto_uses_upside_excursion(self) -> None:
+        # Strongly negative state, tame downside (mae -1), violent upside
+        # (mfe 90): dangerous for a SHORT specifically -> risk_too_wide.
+        ledger = ledger_with("squeezy", [-24.0, -26.0] * 60, mae=-1.0, mfe=90.0)
+        decision = decide(tradeable_row("squeezy"), ledger)
+        self.assertEqual(decision.direction, 0)
+        self.assertEqual(decision.reason, "risk_too_wide")
+        # Same state with contained upside shorts normally.
+        calm = ledger_with("squeezy", [-24.0, -26.0] * 60, mae=-1.0, mfe=30.0)
+        self.assertEqual(decide(tradeable_row("squeezy"), calm).reason, "edge_short")
+
+    def test_broad_key_pools_detailed_states_for_gating(self) -> None:
+        # Two detailed states, 60 observations each: individually below the
+        # 100-observation bar, but they share a broad key and gate together.
+        rows = state_rows("detailed_a", [7.0, 9.0] * 30) + state_rows(
+            "detailed_b", [7.0, 9.0] * 30
+        )
+        for row in rows:
+            row["broad_state_key"] = "midday|trend_up|vol_normal"
+        ledger = EdgeLedger.from_state_rows(rows)
+
+        row = tradeable_row("detailed_a")
+        row["broad_state_key"] = "midday|trend_up|vol_normal"
+        decision = decide(row, ledger)
+        self.assertEqual(decision.reason, "edge_long")
+        self.assertEqual(decision.n, 120)
+        self.assertEqual(decision.state_key, "midday|trend_up|vol_normal")
 
     def test_weak_state_abstains_with_edge_below_cost(self) -> None:
         ledger = ledger_with("weak", [1.0, -1.0] * 60)

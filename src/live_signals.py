@@ -11,6 +11,7 @@ from bar_features import (
     contract_part_from_id,
 )
 from bars import canonical_bar_key, load_continuous_bars
+from candidates import SETUPS, Setup, fire_candidates
 from projectx import BarUnit
 from signals import EdgeLedger, SignalConfig, decide
 from state_profile import causal_thresholds, classify_market_state, read_rows
@@ -34,9 +35,11 @@ class LiveSignalEngine:
         windows: list[int] | None = None,
         data_dir: Path | None = None,
         contract_id: str = "",
+        setups: tuple[Setup, ...] = SETUPS,
     ):
         self.ledger = ledger
         self.signal_config = signal_config
+        self.setups = setups
         self.windows = sorted(set(windows or DEFAULT_BAR_FEATURE_WINDOWS))
         self.data_dir = data_dir
         self.contract_id = contract_id
@@ -86,10 +89,26 @@ class LiveSignalEngine:
         last = dict(feature_rows[-1])
         state = classify_market_state(last, thresholds)
         last["state_key"] = state.key
+        last["broad_state_key"] = state.broad_key
         decision = decide(last, self.ledger, self.signal_config)
+        prev = dict(feature_rows[-2]) if len(feature_rows) >= 2 else None
+        candidates = [
+            {
+                "setup": candidate.setup_key,
+                "direction": candidate.direction,
+                "approved": decision.direction != 0
+                and decision.direction == candidate.direction,
+                "gate_reason": "gate_opposes"
+                if decision.direction != 0 and decision.direction != candidate.direction
+                else decision.reason,
+            }
+            for candidate in fire_candidates(last, prev, self.setups)
+        ]
         return {
             "t": last.get("t", ""),
             "close": last.get("c", ""),
+            "detailed_state_key": state.key,
+            "candidates": candidates,
             **decision.to_dict(),
         }
 
@@ -159,17 +178,31 @@ def format_decision_line(payload: dict[str, Any]) -> str:
     close = payload.get("close", "")
     direction = payload.get("direction", 0)
     if direction == 0:
-        return f"{t} close={close} FLAT {payload.get('reason', '')}"
-    side = "LONG" if direction > 0 else "SHORT"
-    state_key = str(payload.get("state_key", ""))
-    if len(state_key) > STATE_KEY_PRINT_WIDTH:
-        state_key = state_key[: STATE_KEY_PRINT_WIDTH - 3] + "..."
-    return (
-        f"{t} close={close} {side} n={payload.get('n')} "
-        f"lcb={_fmt(payload.get('lcb_ticks'))} "
-        f"exp={_fmt(payload.get('expected_ticks_net'))} "
-        f"stop={_fmt(payload.get('stop_ticks'))} state={state_key}"
-    )
+        line = f"{t} close={close} FLAT {payload.get('reason', '')}"
+    else:
+        side = "LONG" if direction > 0 else "SHORT"
+        state_key = str(payload.get("state_key", ""))
+        if len(state_key) > STATE_KEY_PRINT_WIDTH:
+            state_key = state_key[: STATE_KEY_PRINT_WIDTH - 3] + "..."
+        line = (
+            f"{t} close={close} {side} n={payload.get('n')} "
+            f"lcb={_fmt(payload.get('lcb_ticks'))} "
+            f"exp={_fmt(payload.get('expected_ticks_net'))} "
+            f"stop={_fmt(payload.get('stop_ticks'))} state={state_key}"
+        )
+    candidates = payload.get("candidates") or []
+    if candidates:
+        parts = []
+        for candidate in candidates:
+            side = "LONG" if candidate.get("direction", 0) > 0 else "SHORT"
+            status = (
+                "approved"
+                if candidate.get("approved")
+                else f"blocked({candidate.get('gate_reason', '')})"
+            )
+            parts.append(f"{candidate.get('setup', '')} {side} {status}")
+        line += " | cand: " + "; ".join(parts)
+    return line
 
 
 def _fmt(value: Any) -> str:

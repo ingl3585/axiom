@@ -8,15 +8,16 @@ Run the operational pipeline with:
 python .\main.py
 ```
 
-`python .\main.py` authenticates with Project X, backfills missing MNQ historical bars, normalizes raw data, builds feature tables, then records live quote/trade/depth data until you press `Ctrl+C`. While recording, the signal engine prints an observe-only decision for every completed bar (LONG/SHORT/FLAT with its receipt or abstention reason - no orders). When recording stops, it finalizes the capture, refreshes features and states with the new session, and runs the walk-forward edge-gate evaluation automatically.
+`python .\main.py` authenticates with Project X, backfills missing MNQ historical bars, normalizes raw data, builds feature/state tables, runs the walk-forward edge-gate evaluation, then records live quote/trade/depth data until you press `Ctrl+C`. While recording, the signal engine prints an observe-only decision for every completed bar (LONG/SHORT/FLAT with its receipt or abstention reason - no orders). When recording stops, it finalizes the capture (bronze tables, session bars, intraday features); the new session folds into features, states, and the edge gate at the start of the next run.
 
 ## Run Continuously
 
 Double-click `run_forever.cmd` (or run it from a terminal). It loops the
 pipeline: every time the session ends - nightly maintenance break, token
-expiry, network blip, or Ctrl+C - it finalizes that session, re-evaluates the
-edge gate, waits 60 seconds, then starts fresh (re-authenticating and
-backfilling anything missed). Stop it for real with Ctrl+C, then Y.
+expiry, network blip, or Ctrl+C - it finalizes that session and exits, waits
+60 seconds, then starts fresh: re-authenticating, backfilling anything missed,
+folding the finished session into features/states, and re-evaluating the edge
+gate at startup. Stop it for real with Ctrl+C, then Y.
 
 For unattended overnight running, set Windows sleep to Never while plugged in.
 
@@ -51,6 +52,9 @@ AXIOM_BAR_UNIT_NUMBER=1
 
 # How far back to pull history on a fresh start (days).
 AXIOM_HISTORY_DAYS=365
+
+# Gzip raw realtime captures older than this many days (0 disables).
+AXIOM_RAW_RETENTION_DAYS=14
 ```
 
 ## Main Run
@@ -187,6 +191,12 @@ round-trip cost with margin (and at least 100 prior observations). Every
 non-flat decision carries a receipt (state, sample size, confidence bounds,
 expected net ticks); every flat decision carries a reason code.
 
+Gating uses **broad state keys** (session x trend x volatility - a few dozen
+combinations) so evidence accumulates quickly; the detailed 8-dimension states
+stay in the table for research. Stops and the risk veto are calibrated to the
+trade direction's adverse side: longs against the state's typical downside
+excursion (MAE), shorts against its typical upside excursion (MFE).
+
 `signals` runs a weekly walk-forward evaluation: train the edge ledger on all
 earlier weeks, evaluate on the next, roll forward. The report (markdown + JSON
 under `data/reports/signals/`) includes per-fold results, receipt calibration
@@ -214,14 +224,46 @@ slippage). Bar labels do not reveal ordering inside the window, so any trade
 whose adverse move reaches the stop counts as stopped out - conservative for
 trades that dipped and recovered.
 
-This runs automatically with the main pipeline: during recording, each
-completed live bar is classified and decided in real time (printed and logged
-to `data/live/projectx/signals/.../decisions.jsonl` with full receipts,
-observe-only); after recording stops, the session is folded into the data and
-the walk-forward gate re-evaluated. The live ledger is frozen at session start
-from the existing states table, so live decisions are out-of-sample by
-construction. `python .\main.py signals` remains available to re-run the
-evaluation on demand.
+### Candidate setups (observations, not trades)
+
+A layer of named, pre-registered setups fires alongside the gate:
+
+- `trend_pullback@v1` - long a pullback to the 9 EMA in an uptrend above VWAP
+- `vwap_reclaim@v1` - long a cross back above session VWAP with participation
+- `failed_breakout@v1` - short a failed break above the opening range
+- `exhaustion_reversal@v1` - short a 1.5-sigma VWAP stretch that stops advancing
+
+Candidates fire whenever their rules match, regardless of the gate. Each
+observation is logged with the gate's verdict (approved, or blocked with the
+reason) and scored by the same harness as real trades: next-bar entry, session
+costs, and a stop derived for the candidate's own direction from the state's
+history (longs against typical downside, shorts against typical upside).
+Observations are non-overlapping - re-fires within the horizon cooldown are
+tallied as suppressed rather than double-counted. The walk-forward report
+carries a per-setup table; the live stream appends fired candidates to every
+decision line, so blocked ideas stay visible instead of collapsing into
+`FLAT`.
+
+Each non-overlapping observation is also persisted to
+`data/reports/signals/candidates_<timestamp>.csv` with its gate verdict,
+stop-managed outcome, and a signal-bar condition snapshot (session, time since
+open, RSI, VWAP distance/sigma, participation, OR status - the conditions on
+the bar that fired; entry itself is the next bar) - the raw material for later
+slicing setups by regime.
+
+Discipline rule: a setup's rules are frozen under its version. Changing the
+rules means a new version (`@v2`), which restarts its track record - setups
+are never silently retuned against the data that judged them.
+
+This runs automatically with the main pipeline: the walk-forward gate is
+evaluated at the start of each run (right after features and states rebuild,
+so each completed session is folded in exactly once), and during recording
+each completed live bar is classified and decided in real time (printed and
+logged to `data/live/projectx/signals/.../decisions.jsonl` with full receipts,
+observe-only). The live ledger is frozen at session start from the existing
+states table, so live decisions are out-of-sample by construction.
+`python .\main.py signals` remains available to re-run the evaluation on
+demand.
 
 ## Data Layout
 
@@ -243,4 +285,4 @@ Raw files are the audit trail. Bronze files are cleaned enough for analysis. Sil
 
 ## Current Scope
 
-Axiom currently ingests, cleans, and builds features from Project X market data, and records live market data. It does not generate trade signals or place trades yet. The next steps are signal generation, then paper/practice-account order execution behind explicit risk controls.
+Axiom currently ingests, cleans, and builds features from Project X market data, records live market data, and generates observe-only trade signals with full receipts behind a walk-forward edge gate. It does not place orders. Execution (paper/practice account first, behind explicit risk controls) is deliberately deferred until the edge gate opens on out-of-sample evidence.

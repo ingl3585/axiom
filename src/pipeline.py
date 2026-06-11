@@ -22,6 +22,7 @@ from projectx import (
     unit_seconds,
 )
 from recording import RecordingConfig, start_realtime_recorder
+from retention import compress_old_realtime
 from state_profile import StateProfileConfig, build_state_profile
 from walkforward import find_latest_states_path, run_signals_command
 
@@ -58,11 +59,24 @@ def run_pipeline() -> int:
     print_section("Normalize")
     normalize_all(settings)
 
+    compressed = compress_old_realtime(settings.data_dir, settings.raw_retention_days)
+    if compressed:
+        print(
+            f"\nretention: compressed {len(compressed)} raw realtime files "
+            f"older than {settings.raw_retention_days} days"
+        )
+
     print_section("Features")
     build_latest_features(settings)
 
     print_section("Bar Features")
     build_bar_feature_table(settings, backfill_result.contract.id)
+
+    print_section("Edge Gate")
+    try:
+        run_signals_command()
+    except ValueError as exc:
+        print(f"skipped signals evaluation: {exc}")
 
     print_section("Live Recording")
     code = record_live_data(
@@ -198,13 +212,16 @@ def build_bar_features_for_partition(
     )
     print(f"  states: {profile.rows_path}")
     print(f"  summary: {profile.markdown_path}")
-    print("  next: `python .\\main.py signals` evaluates the walk-forward edge gate")
 
 
 def record_live_data(settings: Settings, contract_id: str) -> int:
     print("Recording real-time Project X data. Press Ctrl+C to stop.")
     sys.stdout.flush()
     bar_unit = bar_unit_from_name(settings.bar_unit)
+    # Build the engine before the recorder starts so no bar can close in the
+    # gap: the engine's bootstrap absorbs pre-existing live files silently,
+    # and every bar the new recorder emits is then decided on.
+    engine = build_live_engine(settings, contract_id, bar_unit)
     process = start_realtime_recorder(
         RecordingConfig(
             contract_id=contract_id,
@@ -216,7 +233,6 @@ def record_live_data(settings: Settings, contract_id: str) -> int:
             bar_interval_seconds=unit_seconds(bar_unit, settings.bar_unit_number),
         )
     )
-    engine = build_live_engine(settings, contract_id, bar_unit)
     code = watch_recording(process, engine)
 
     print_section("Finalize Recorded Data")
@@ -234,13 +250,9 @@ def record_live_data(settings: Settings, contract_id: str) -> int:
     except ValueError as exc:
         print(f"skipped recorded-data finalization: {exc}")
 
-    print_section("Session Edge Gate")
-    try:
-        build_bar_feature_table(settings, contract_id)
-        run_signals_command()
-    except ValueError as exc:
-        print(f"skipped session signals evaluation: {exc}")
-
+    # Bar features, the state profile, and the edge gate are rebuilt at the
+    # start of the next pipeline run (the run_forever loop restarts within a
+    # minute), so the session is folded in exactly once - no duplicate rebuild.
     return code
 
 
@@ -354,13 +366,9 @@ def build_session_bars_from_outputs(
     _, contract_part = date_contract_partitions(trade_output.path)
     continuous = load_continuous_bars(data_dir, contract_part, bar_unit, bar_unit_number)
     print(f"  continuous bars (history + live): {len(continuous):,}")
-
-    build_bar_features_for_partition(
-        data_dir=data_dir,
-        contract_part=contract_part,
-        bar_unit=bar_unit,
-        bar_unit_number=bar_unit_number,
-    )
+    # Bar features and the state profile are NOT rebuilt here: the next
+    # pipeline run rebuilds them once at startup (before the edge gate), so
+    # each session folds in exactly once across run_forever cycles.
 
 
 def resolve_active_contract(

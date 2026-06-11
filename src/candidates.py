@@ -81,7 +81,145 @@ def exhaustion_reversal(row: dict[str, Any], prev: dict[str, Any] | None) -> int
     return -1 if sigma >= 1.5 and rsi >= 70 and last_return < 0 else 0
 
 
+def trend_continuation(row: dict[str, Any], prev: dict[str, Any] | None) -> int:
+    """Follow the prevailing EMA/VWAP trend when recent momentum agrees.
+    Thesis: practice mode needs a broad, learnable participation setup rather
+    than only rare event triggers."""
+    dist_9 = parse_float(row.get("dist_ema_9"))
+    dist_21 = parse_float(row.get("dist_ema_21"))
+    dist_vwap = parse_float(row.get("dist_vwap"))
+    return_5 = parse_float(row.get("return_5bar"))
+    volume_ratio = parse_float(row.get("vol_ratio_20bar"))
+    rsi = parse_float(row.get("rsi_9"))
+    if (
+        dist_9 is None
+        or dist_21 is None
+        or dist_vwap is None
+        or return_5 is None
+        or volume_ratio is None
+        or rsi is None
+    ):
+        return 0
+    active_enough = volume_ratio >= 0.25
+    uptrend = dist_9 < dist_21 and dist_vwap > 0 and return_5 > 0
+    downtrend = dist_9 > dist_21 and dist_vwap < 0 and return_5 < 0
+    if uptrend and active_enough and rsi < 85:
+        return 1
+    if downtrend and active_enough and rsi > 15:
+        return -1
+    return 0
+
+
+def breakout_continuation(row: dict[str, Any], prev: dict[str, Any] | None) -> int:
+    """Follow a confirmed opening-range breakout in the direction of VWAP,
+    short-term momentum, and participation. Thesis: strong session moves often
+    keep squeezing before they mean-revert."""
+    dist_vwap = parse_float(row.get("dist_vwap"))
+    or_breakout = parse_float(row.get("or_breakout"))
+    return_5 = parse_float(row.get("return_5bar"))
+    volume_ratio = parse_float(row.get("vol_ratio_20bar"))
+    rsi = parse_float(row.get("rsi_9"))
+    if (
+        dist_vwap is None
+        or or_breakout is None
+        or return_5 is None
+        or volume_ratio is None
+        or rsi is None
+    ):
+        return 0
+    active = volume_ratio >= 0.75
+    if or_breakout > 0 and dist_vwap > 0 and return_5 > 0 and active and rsi < 90:
+        return 1
+    if or_breakout < 0 and dist_vwap < 0 and return_5 < 0 and active and rsi > 10:
+        return -1
+    return 0
+
+
+def breakout_pullback(row: dict[str, Any], prev: dict[str, Any] | None) -> int:
+    """Buy a pullback that holds above VWAP after an upside opening-range
+    breakout, and sell the inverse after a downside breakout."""
+    dist_vwap = parse_float(row.get("dist_vwap"))
+    dist_9 = parse_float(row.get("dist_ema_9"))
+    or_breakout = parse_float(row.get("or_breakout"))
+    last_return = parse_float(row.get("return_1"))
+    volume_ratio = parse_float(row.get("vol_ratio_20bar"))
+    rsi = parse_float(row.get("rsi_9"))
+    if (
+        dist_vwap is None
+        or dist_9 is None
+        or or_breakout is None
+        or last_return is None
+        or volume_ratio is None
+        or rsi is None
+    ):
+        return 0
+    active_enough = volume_ratio >= 0.25
+    upside_pullback = (
+        or_breakout > 0
+        and dist_vwap > 0
+        and dist_9 <= 0
+        and last_return > 0
+        and active_enough
+        and 45 <= rsi <= 80
+    )
+    downside_pullback = (
+        or_breakout < 0
+        and dist_vwap < 0
+        and dist_9 >= 0
+        and last_return < 0
+        and active_enough
+        and 20 <= rsi <= 55
+    )
+    if upside_pullback:
+        return 1
+    if downside_pullback:
+        return -1
+    return 0
+
+
+def breakout_bias(row: dict[str, Any], prev: dict[str, Any] | None) -> int:
+    """Keep a directional bias while price holds on the breakout side of VWAP
+    and the opening range. Thesis: this is the broad practice participation
+    candidate, with risk controlled by execution limits rather than rare fires."""
+    dist_vwap = parse_float(row.get("dist_vwap"))
+    or_breakout = parse_float(row.get("or_breakout"))
+    volume_ratio = parse_float(row.get("vol_ratio_20bar"))
+    rsi = parse_float(row.get("rsi_9"))
+    if dist_vwap is None or or_breakout is None or volume_ratio is None or rsi is None:
+        return 0
+    active_enough = volume_ratio >= 0.25
+    if or_breakout > 0 and dist_vwap > 0 and active_enough and rsi < 85:
+        return 1
+    if or_breakout < 0 and dist_vwap < 0 and active_enough and rsi > 15:
+        return -1
+    return 0
+
+
 SETUPS: tuple[Setup, ...] = (
+    Setup(
+        name="breakout_bias",
+        version="v1",
+        description="Trade the opening-range breakout side while price holds VWAP.",
+        evaluate=breakout_bias,
+    ),
+    Setup(
+        name="breakout_pullback",
+        version="v1",
+        description="Join an opening-range breakout after a VWAP-holding pullback.",
+        evaluate=breakout_pullback,
+    ),
+    Setup(
+        name="trend_continuation",
+        version="v1",
+        description="Follow the broad EMA/VWAP trend when recent momentum agrees.",
+        evaluate=trend_continuation,
+    ),
+    Setup(
+        name="breakout_continuation",
+        version="v1",
+        description="Follow an active opening-range breakout aligned with VWAP.",
+        evaluate=breakout_continuation,
+    ),
     Setup(
         name="trend_pullback",
         version="v1",

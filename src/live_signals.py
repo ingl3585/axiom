@@ -24,7 +24,8 @@ class LiveSignalEngine:
 
     The edge ledger is frozen at startup (built from the existing states.csv),
     so live decisions are out-of-sample by construction. Decisions are
-    observational: they are printed and logged with full receipts, no orders.
+    printed and logged with full receipts; execution config decides whether
+    those receipts stay informational or feed practice orders.
     """
 
     def __init__(

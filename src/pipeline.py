@@ -287,9 +287,12 @@ def build_live_engine(
         unit_number=settings.bar_unit_number,
         states_path=states_path,
     )
+    execution_note = "execution disabled"
+    if settings.execution_enabled:
+        execution_note = f"execution source={settings.execution_signal_source}"
     print(
-        "live signals: observe-only decision stream active "
-        f"(ledger states: {len(engine.ledger):,}); no orders are placed."
+        "live signals: decision stream active "
+        f"(ledger states: {len(engine.ledger):,}; {execution_note})"
     )
     return engine
 

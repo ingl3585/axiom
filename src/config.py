@@ -47,6 +47,11 @@ def env_int_optional(name: str) -> int | None:
         return None
 
 
+def env_csv(name: str, default: str = "") -> tuple[str, ...]:
+    value = os.environ.get(name, default)
+    return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     projectx_username: str | None
@@ -65,6 +70,13 @@ class Settings:
     execution_max_contracts: int
     execution_require_gate_open: bool
     execution_allow_live: bool
+    execution_signal_source: str
+    execution_candidate_setups: tuple[str, ...]
+    execution_max_trades_per_day: int
+    execution_cooldown_bars: int
+    execution_fixed_stop_ticks: int | None
+    execution_use_stop_bracket: bool
+    execution_horizon_bars: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -93,6 +105,28 @@ class Settings:
                 default=True,
             ),
             execution_allow_live=env_bool("AXIOM_EXECUTION_ALLOW_LIVE", default=False),
+            execution_signal_source=(
+                os.environ.get("AXIOM_EXECUTION_SIGNAL_SOURCE") or "gate"
+            )
+            .strip()
+            .lower(),
+            execution_candidate_setups=env_csv(
+                "AXIOM_EXECUTION_CANDIDATE_SETUPS",
+                default="all",
+            ),
+            execution_max_trades_per_day=env_int(
+                "AXIOM_EXECUTION_MAX_TRADES_PER_DAY",
+                3,
+            ),
+            execution_cooldown_bars=env_int("AXIOM_EXECUTION_COOLDOWN_BARS", 10),
+            execution_fixed_stop_ticks=env_int_optional(
+                "AXIOM_EXECUTION_FIXED_STOP_TICKS"
+            ),
+            execution_use_stop_bracket=env_bool(
+                "AXIOM_EXECUTION_USE_STOP_BRACKET",
+                default=False,
+            ),
+            execution_horizon_bars=env_int("AXIOM_EXECUTION_HORIZON_BARS", 5),
         )
 
     def require_projectx_credentials(self) -> tuple[str, str]:

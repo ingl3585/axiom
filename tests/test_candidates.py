@@ -5,9 +5,13 @@ import unittest
 import _bootstrap  # noqa: F401
 from candidates import (
     Setup,
+    breakout_bias,
+    breakout_continuation,
+    breakout_pullback,
     exhaustion_reversal,
     failed_breakout,
     fire_candidates,
+    trend_continuation,
     trend_pullback,
     vwap_reclaim,
 )
@@ -52,6 +56,97 @@ class SetupRuleTests(unittest.TestCase):
         self.assertEqual(exhaustion_reversal({**row, "return_1": "0.0002"}, None), 0)
         self.assertEqual(exhaustion_reversal({**row, "vwap_sigma": "0.8"}, None), 0)
         self.assertEqual(exhaustion_reversal({**row, "rsi_9": "60"}, None), 0)
+
+    def test_trend_continuation_follows_broad_trend(self) -> None:
+        long_row = {
+            "dist_ema_9": "0.001",
+            "dist_ema_21": "0.004",
+            "dist_vwap": "0.01",
+            "return_5bar": "0.001",
+            "vol_ratio_20bar": "0.3",
+            "rsi_9": "72",
+        }
+        self.assertEqual(trend_continuation(long_row, None), 1)
+        short_row = {
+            "dist_ema_9": "-0.001",
+            "dist_ema_21": "-0.004",
+            "dist_vwap": "-0.01",
+            "return_5bar": "-0.001",
+            "vol_ratio_20bar": "0.3",
+            "rsi_9": "28",
+        }
+        self.assertEqual(trend_continuation(short_row, None), -1)
+        self.assertEqual(
+            trend_continuation({**long_row, "vol_ratio_20bar": "0.1"}, None),
+            0,
+        )
+        self.assertEqual(trend_continuation({**long_row, "rsi_9": "90"}, None), 0)
+
+    def test_breakout_continuation_follows_active_breakout(self) -> None:
+        long_row = {
+            "dist_vwap": "120",
+            "or_breakout": "1",
+            "return_5bar": "80",
+            "vol_ratio_20bar": "1.1",
+            "rsi_9": "78",
+        }
+        self.assertEqual(breakout_continuation(long_row, None), 1)
+        short_row = {
+            "dist_vwap": "-120",
+            "or_breakout": "-1",
+            "return_5bar": "-80",
+            "vol_ratio_20bar": "1.1",
+            "rsi_9": "22",
+        }
+        self.assertEqual(breakout_continuation(short_row, None), -1)
+        self.assertEqual(
+            breakout_continuation({**long_row, "vol_ratio_20bar": "0.5"}, None),
+            0,
+        )
+        self.assertEqual(
+            breakout_continuation({**long_row, "rsi_9": "94"}, None),
+            0,
+        )
+
+    def test_breakout_pullback_joins_vwap_holding_pullback(self) -> None:
+        long_row = {
+            "dist_vwap": "0.012",
+            "dist_ema_9": "-0.0001",
+            "or_breakout": "1",
+            "return_1": "0.0003",
+            "vol_ratio_20bar": "0.48",
+            "rsi_9": "60",
+        }
+        self.assertEqual(breakout_pullback(long_row, None), 1)
+        short_row = {
+            "dist_vwap": "-0.012",
+            "dist_ema_9": "0.0001",
+            "or_breakout": "-1",
+            "return_1": "-0.0003",
+            "vol_ratio_20bar": "0.48",
+            "rsi_9": "40",
+        }
+        self.assertEqual(breakout_pullback(short_row, None), -1)
+        self.assertEqual(breakout_pullback({**long_row, "dist_vwap": "-0.1"}, None), 0)
+        self.assertEqual(breakout_pullback({**long_row, "return_1": "-0.1"}, None), 0)
+
+    def test_breakout_bias_follows_breakout_side_while_holding_vwap(self) -> None:
+        long_row = {
+            "dist_vwap": "0.011",
+            "or_breakout": "1",
+            "vol_ratio_20bar": "0.65",
+            "rsi_9": "55",
+        }
+        self.assertEqual(breakout_bias(long_row, None), 1)
+        short_row = {
+            "dist_vwap": "-0.011",
+            "or_breakout": "-1",
+            "vol_ratio_20bar": "0.65",
+            "rsi_9": "45",
+        }
+        self.assertEqual(breakout_bias(short_row, None), -1)
+        self.assertEqual(breakout_bias({**long_row, "dist_vwap": "-0.011"}, None), 0)
+        self.assertEqual(breakout_bias({**long_row, "vol_ratio_20bar": "0.1"}, None), 0)
 
 
 class FireCandidatesTests(unittest.TestCase):

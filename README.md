@@ -8,7 +8,7 @@ Run the operational pipeline with:
 python .\main.py
 ```
 
-`python .\main.py` authenticates with Project X, backfills missing MNQ historical bars, normalizes raw data, builds feature/state tables, runs the walk-forward edge-gate evaluation, then records live quote/trade/depth data until you press `Ctrl+C`. While recording, the signal engine prints an observe-only decision for every completed bar (LONG/SHORT/FLAT with its receipt or abstention reason - no orders). When recording stops, it finalizes the capture (bronze tables, session bars, intraday features); the new session folds into features, states, and the edge gate at the start of the next run.
+`python .\main.py` authenticates with Project X, backfills missing MNQ historical bars, normalizes raw data, builds feature/state tables, runs the walk-forward edge-gate evaluation, then records live quote/trade/depth data until you press `Ctrl+C`. While recording, the signal engine prints a decision for every completed bar (LONG/SHORT/FLAT with its receipt or abstention reason) plus any named candidate setups that fired. Execution is disabled by default; when enabled, it can either follow the strict gate or selected candidate setups. When recording stops, it finalizes the capture (bronze tables, session bars, intraday features); the new session folds into features, states, and the edge gate at the start of the next run.
 
 ## Run Continuously
 
@@ -63,6 +63,13 @@ AXIOM_EXECUTION_ACCOUNT_ID=
 AXIOM_EXECUTION_MAX_CONTRACTS=1
 AXIOM_EXECUTION_REQUIRE_GATE_OPEN=true
 AXIOM_EXECUTION_ALLOW_LIVE=false
+AXIOM_EXECUTION_SIGNAL_SOURCE=gate
+AXIOM_EXECUTION_CANDIDATE_SETUPS=all
+AXIOM_EXECUTION_MAX_TRADES_PER_DAY=3
+AXIOM_EXECUTION_COOLDOWN_BARS=10
+AXIOM_EXECUTION_FIXED_STOP_TICKS=20
+AXIOM_EXECUTION_USE_STOP_BRACKET=false
+AXIOM_EXECUTION_HORIZON_BARS=5
 ```
 
 ## Main Run
@@ -236,6 +243,10 @@ trades that dipped and recovered.
 
 A layer of named, pre-registered setups fires alongside the gate:
 
+- `breakout_bias@v1` - trade the opening-range breakout side while price holds VWAP
+- `breakout_pullback@v1` - join an opening-range breakout after a VWAP-holding pullback
+- `trend_continuation@v1` - follow the broad EMA/VWAP trend when recent momentum agrees
+- `breakout_continuation@v1` - follow an active opening-range breakout aligned with VWAP
 - `trend_pullback@v1` - long a pullback to the 9 EMA in an uptrend above VWAP
 - `vwap_reclaim@v1` - long a cross back above session VWAP with participation
 - `failed_breakout@v1` - short a failed break above the opening range
@@ -267,18 +278,19 @@ This runs automatically with the main pipeline: the walk-forward gate is
 evaluated at the start of each run (right after features and states rebuild,
 so each completed session is folded in exactly once), and during recording
 each completed live bar is classified and decided in real time (printed and
-logged to `data/live/projectx/signals/.../decisions.jsonl` with full receipts,
-observe-only). The live ledger is frozen at session start from the existing
+logged to `data/live/projectx/signals/.../decisions.jsonl` with full receipts).
+The live ledger is frozen at session start from the existing
 states table, so live decisions are out-of-sample by construction.
 `python .\main.py signals` remains available to re-run the evaluation on
 demand.
 
 ## Practice Execution
 
-Axiom can wire observe-only decisions into Project X order endpoints, but it is
-disabled by default. The first version is intentionally small: one market entry
-at a time, optional Project X stop-loss bracket from the signal's stop, no
-instant reversal, close on opposite signal or time exit, and JSONL receipts under
+Axiom can wire decisions into Project X order endpoints, but it is disabled by
+default. The bridge is intentionally small: one market entry at a time, one
+contract by default, no instant reversal, close on opposite signal or time exit,
+max trades per day, cooldown between entries, optional Project X stop-loss
+brackets, and JSONL receipts under
 `data/live/projectx/execution/.../events.jsonl`.
 
 For a practice-account smoke test:
@@ -304,6 +316,43 @@ AXIOM_EXECUTION_REQUIRE_GATE_OPEN=false
 Leave it that way unless you deliberately intend to test a live-data/live-account
 configuration later.
 
+### Candidate practice mode
+
+The strict edge gate is useful research context, but it can be too quiet while
+you are trying to observe practice-account behavior. Candidate mode lets selected
+named setups trigger bounded practice trades while still logging what the gate
+said about the same bar.
+
+```text
+PROJECTX_LIVE=false
+AXIOM_EXECUTION_ENABLED=true
+AXIOM_EXECUTION_DRY_RUN=false
+AXIOM_EXECUTION_ACCOUNT_ID=<your practice account id>
+AXIOM_EXECUTION_MAX_CONTRACTS=1
+AXIOM_EXECUTION_SIGNAL_SOURCE=candidate
+AXIOM_EXECUTION_CANDIDATE_SETUPS=all
+AXIOM_EXECUTION_MAX_TRADES_PER_DAY=3
+AXIOM_EXECUTION_COOLDOWN_BARS=10
+AXIOM_EXECUTION_FIXED_STOP_TICKS=20
+AXIOM_EXECUTION_USE_STOP_BRACKET=false
+AXIOM_EXECUTION_HORIZON_BARS=5
+```
+
+In this mode, a selected candidate can place a practice trade even if the gate
+says `edge_below_cost`. That verdict is kept in the execution receipt as
+metadata (`gate=edge_below_cost`) instead of acting as the handbrake. If
+`AXIOM_EXECUTION_FIXED_STOP_TICKS` is blank, candidate mode defaults to a
+20-tick planned stop. By default, Axiom does **not** send that stop as a Project
+X order bracket because TopstepX Position Brackets can reject API orders that
+also include `stopLossBracket`. Keep `AXIOM_EXECUTION_USE_STOP_BRACKET=false`
+unless you have explicitly enabled the compatible Auto OCO Brackets behavior in
+TopstepX.
+
+`AXIOM_EXECUTION_CANDIDATE_SETUPS=all` trades every registered candidate setup.
+Use a comma-separated list, such as
+`trend_pullback@v1,vwap_reclaim@v1`, only when you deliberately want to narrow
+which setups can trigger practice orders.
+
 ## Data Layout
 
 ```text
@@ -325,4 +374,4 @@ Raw files are the audit trail. Bronze files are cleaned enough for analysis. Sil
 
 ## Current Scope
 
-Axiom currently ingests, cleans, and builds features from Project X market data, records live market data, generates observe-only trade signals with full receipts behind a walk-forward edge gate, and includes disabled-by-default practice execution plumbing. Real execution remains opt-in via environment flags and should start with one MNQ contract in a practice account.
+Axiom currently ingests, cleans, and builds features from Project X market data, records live market data, generates trade decisions and candidate observations with full receipts, and includes disabled-by-default practice execution plumbing. Execution remains opt-in via environment flags and should start with one MNQ contract in a practice account.
